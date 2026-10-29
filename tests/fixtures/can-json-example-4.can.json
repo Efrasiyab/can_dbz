@@ -40,7 +40,18 @@
                     "bit_length": 8,
                     "byte_order": "little_endian",
                     "type": "unsigned",
-                    "is_multiplexer": true
+                    "is_multiplexer": true,
+                    "when": [
+                        {
+                            "selector": "Service",
+                            "ranges": [
+                                [
+                                    "1",
+                                    "1"
+                                ]
+                            ]
+                        }
+                    ]
                 },
                 {
                     "name": "ReadValue",

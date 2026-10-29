@@ -88,6 +88,23 @@ test "node description DBC fixture imports and exports with escaping" {
     try std.testing.expectEqualStrings(description, reparsed.nodes.items[0].description.?);
 }
 
+test "DBC with selectors declared after their signals (cantools ordering) imports nested multiplexing" {
+    var diagnostics: std.ArrayListUnmanaged(can_dbz.diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try can_dbz.formats.dbc.parse(std.testing.allocator, @embedFile("fixtures/nested-mux-cantools.dbc"), &diagnostics);
+    defer doc.deinit();
+    const signals = doc.messages.items[0].signals.items;
+    try std.testing.expectEqualStrings("WriteStatus", signals[0].name);
+    try std.testing.expectEqual(@as(usize, 1), signals[0].when.items.len);
+    try std.testing.expectEqualStrings("Service", signals[0].when.items[0].selector);
+    // ReadValue depends on SubId, whose own Service=1 condition is re-expanded.
+    try std.testing.expectEqual(@as(usize, 2), signals[1].when.items.len);
+    try std.testing.expectEqualStrings("Service", signals[1].when.items[0].selector);
+    try std.testing.expectEqualStrings("SubId", signals[1].when.items[1].selector);
+    try std.testing.expectEqualStrings("10", signals[1].when.items[1].ranges.items[0].minimum);
+    try std.testing.expectEqualStrings("11", signals[1].when.items[1].ranges.items[0].maximum);
+}
+
 test "all complete CAN JSON guide examples export to DBC" {
     const examples = [_][]const u8{
         @embedFile("fixtures/can-json-quick-start.can.json"),
@@ -105,6 +122,15 @@ test "all complete CAN JSON guide examples export to DBC" {
         defer diagnostics.deinit(std.testing.allocator);
         const dbc_bytes = try can_dbz.formats.dbc.writeWithDiagnostics(std.testing.allocator, &doc, &diagnostics);
         defer std.testing.allocator.free(dbc_bytes);
+        if (doc.name != null and std.mem.eql(u8, doc.name.?, "NestedMux")) {
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "\n  VAL_\n") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_ SubId m1M :") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_ WriteStatus m2 :") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_ ReadValue m10 :") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_MUL_VAL_ 1024 SubId Service 1-1;") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_MUL_VAL_ 1024 ReadValue SubId 10-10, 11-11;") != null);
+            try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_MUL_VAL_ 1024 WriteStatus Service 2-2;") != null);
+        }
         var imported = try can_dbz.formats.dbc.parse(std.testing.allocator, dbc_bytes, &diagnostics);
         defer imported.deinit();
         try std.testing.expectEqual(doc.messages.items.len, imported.messages.items.len);
@@ -135,6 +161,15 @@ test "all complete CAN JSON guide examples export to DBC" {
                 try std.testing.expectEqual(expected_signal.byte_order, actual_signal.byte_order);
                 try std.testing.expectEqual(expected_signal.signal_type, actual_signal.signal_type);
                 try std.testing.expectEqual(expected_signal.is_multiplexer, actual_signal.is_multiplexer);
+                if (expected_signal.when.items.len != actual_signal.when.items.len) {
+                    std.debug.print("{s}.{s}: expected {d} mux conditions, imported {d}\n", .{
+                        expected_message.name,
+                        expected_signal.name,
+                        expected_signal.when.items.len,
+                        actual_signal.when.items.len,
+                    });
+                    for (actual_signal.when.items) |condition| std.debug.print("  selector {s}\n", .{condition.selector});
+                }
                 try std.testing.expectEqual(expected_signal.when.items.len, actual_signal.when.items.len);
                 if (expected_signal.description) |description| {
                     try std.testing.expectEqualStrings(description, actual_signal.description.?);

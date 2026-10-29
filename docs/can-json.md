@@ -491,7 +491,10 @@ Multiple `when` entries are ANDed: a signal can depend on more than one selector
           "bit_length": 8,
           "byte_order": "little_endian",
           "type": "unsigned",
-          "is_multiplexer": true
+          "is_multiplexer": true,
+          "when": [
+            { "selector": "Service", "ranges": [["1", "1"]] }
+          ]
         },
         {
           "name": "ReadValue",

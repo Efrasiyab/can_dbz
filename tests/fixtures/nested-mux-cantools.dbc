@@ -1,0 +1,21 @@
+VERSION ""
+
+NS_ :
+	SG_MUL_VAL_
+
+BS_:
+
+BU_:
+
+BO_ 1024 ServiceResponse: 8 Vector__XXX
+ SG_ WriteStatus m2 : 16|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ ReadValue m10 : 16|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ SubId M : 8|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Service M : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+VAL_ 1024 WriteStatus 0 "OK" 1 "Denied" 2 "Busy" ;
+VAL_ 1024 Service 1 "Read" 2 "Write" ;
+
+SG_MUL_VAL_ 1024 SubId Service 1-1;
+SG_MUL_VAL_ 1024 ReadValue SubId 10-11;
+SG_MUL_VAL_ 1024 WriteStatus Service 2-2;

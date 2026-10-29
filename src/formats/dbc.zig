@@ -157,6 +157,8 @@ pub fn parseWithOptions(
     }
 
     if (doc.buses.items.len == 0) try doc.buses.append(a, .{ .name = "can0" });
+    try resolveMuxSelectors(&doc, allocator, diagnostics);
+    try expandMuxAncestors(&doc);
     if (!try validate.validateDocument(&doc, allocator, diagnostics)) return error.InvalidDbc;
     return doc;
 }
@@ -322,14 +324,20 @@ fn parseLine(
                 signal.is_multiplexer = true;
                 last_mux.* = signal.name;
             } else if (std.mem.startsWith(u8, code, "m")) {
-                const selector = last_mux.* orelse return lineError(allocator, diagnostics, tokens[1], "multiplexed signal has no preceding selector");
-                const value = std.fmt.parseInt(u64, code[1..], 10) catch return lineError(allocator, diagnostics, tokens[1], "invalid simple mux value");
+                const selector = last_mux.* orelse "";
+                const nested_mux = std.mem.endsWith(u8, code, "M");
+                const value_text = code[1 .. code.len - @intFromBool(nested_mux)];
+                const value = std.fmt.parseInt(u64, value_text, 10) catch return lineError(allocator, diagnostics, tokens[1], "invalid simple mux value");
                 var ranges: std.ArrayListUnmanaged(model.RawRange) = .empty;
                 try ranges.append(a, .{
                     .minimum = try std.fmt.allocPrint(a, "{d}", .{value}),
                     .maximum = try std.fmt.allocPrint(a, "{d}", .{value}),
                 });
                 try signal.when.append(a, .{ .selector = selector, .ranges = ranges });
+                if (nested_mux) {
+                    signal.is_multiplexer = true;
+                    last_mux.* = signal.name;
+                }
             } else return lineError(allocator, diagnostics, tokens[1], "unsupported DBC multiplexing marker");
         }
         var message = &doc.messages.items[message_index];
@@ -461,6 +469,7 @@ fn parseSignalMultiplexerValues(
             }
             if (!std.mem.eql(u8, tokens[index].text, ";"))
                 return lineError(allocator, diagnostics, tokens[index], "unterminated SG_MUL_VAL_ ranges");
+            signal.when.clearRetainingCapacity();
             try signal.when.append(doc.allocator(), .{ .selector = try doc.allocator().dupe(u8, tokens[3].text), .ranges = ranges });
             return;
         }
@@ -635,6 +644,124 @@ fn containsEnumValue(values: []const u16, expected: u16) bool {
     return false;
 }
 
+fn sameRanges(left: []const model.RawRange, right: []const model.RawRange) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |left_range, right_range| {
+        if (!std.mem.eql(u8, left_range.minimum, right_range.minimum) or
+            !std.mem.eql(u8, left_range.maximum, right_range.maximum)) return false;
+    }
+    return true;
+}
+
+fn conditionsEqual(left: model.MuxCondition, right: model.MuxCondition) bool {
+    return std.mem.eql(u8, left.selector, right.selector) and sameRanges(left.ranges.items, right.ranges.items);
+}
+
+fn findSignal(message: *const model.Message, name: []const u8) ?*const model.Signal {
+    for (message.signals.items) |*signal| {
+        if (std.mem.eql(u8, signal.name, name)) return signal;
+    }
+    return null;
+}
+
+fn hasSelector(conditions: []const model.MuxCondition, name: []const u8) bool {
+    for (conditions) |condition| if (std.mem.eql(u8, condition.selector, name)) return true;
+    return false;
+}
+
+/// DBC records one parent selector per signal, so the parent's own conditions are implied.
+fn conditionImplied(message: *const model.Message, selector: *const model.Signal, condition: model.MuxCondition, depth: usize) bool {
+    if (depth > message.signals.items.len) return false;
+    for (selector.when.items) |ancestor| {
+        if (conditionsEqual(ancestor, condition)) return true;
+        const parent = findSignal(message, ancestor.selector) orelse continue;
+        if (conditionImplied(message, parent, condition, depth + 1)) return true;
+    }
+    return false;
+}
+
+/// Index of the one condition DBC can carry; all others must be implied by that selector's own conditions.
+fn parentCondition(message: *const model.Message, signal: *const model.Signal) ?usize {
+    if (signal.when.items.len == 0) return null;
+    if (signal.when.items.len == 1) return 0;
+    for (signal.when.items, 0..) |candidate, index| {
+        const selector = findSignal(message, candidate.selector) orelse continue;
+        var covered = true;
+        for (signal.when.items, 0..) |other, other_index| {
+            if (index != other_index and !conditionImplied(message, selector, other, 0)) {
+                covered = false;
+                break;
+            }
+        }
+        if (covered) return index;
+    }
+    return null;
+}
+
+fn collectMuxAncestors(
+    arena: std.mem.Allocator,
+    message: *const model.Message,
+    selector_name: []const u8,
+    list: *std.ArrayListUnmanaged(model.MuxCondition),
+    depth: usize,
+) std.mem.Allocator.Error!void {
+    if (depth > message.signals.items.len) return;
+    const selector = findSignal(message, selector_name) orelse return;
+    for (selector.when.items) |ancestor| {
+        try collectMuxAncestors(arena, message, ancestor.selector, list, depth + 1);
+        if (!hasSelector(list.items, ancestor.selector)) try list.append(arena, ancestor);
+    }
+}
+
+/// Signals may precede their selector, so markers without one resolve to the message's only multiplexer.
+fn resolveMuxSelectors(
+    doc: *model.Document,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    const arena = doc.allocator();
+    for (doc.messages.items) |*message| {
+        var root: []const u8 = "";
+        var root_count: usize = 0;
+        for (message.signals.items) |signal| {
+            if (!signal.is_multiplexer) continue;
+            root = signal.name;
+            root_count += 1;
+        }
+        for (message.signals.items) |*signal| {
+            for (signal.when.items) |*condition| {
+                if (condition.selector.len != 0) continue;
+                if (root_count != 1) {
+                    try diagnostics.append(allocator, .{
+                        .severity = .@"error",
+                        .code = .invalid_dbc,
+                        .message = "multiplexer selector cannot be determined without SG_MUL_VAL_",
+                        .context = .{ .message = message.name, .signal = signal.name },
+                    });
+                    return error.InvalidDbc;
+                }
+                condition.selector = try arena.dupe(u8, root);
+            }
+        }
+    }
+}
+
+fn expandMuxAncestors(doc: *model.Document) std.mem.Allocator.Error!void {
+    const arena = doc.allocator();
+    for (doc.messages.items) |*message| {
+        for (message.signals.items) |*signal| {
+            if (signal.when.items.len == 0) continue;
+            var expanded: std.ArrayListUnmanaged(model.MuxCondition) = .empty;
+            for (signal.when.items) |condition| try collectMuxAncestors(arena, message, condition.selector, &expanded, 0);
+            if (expanded.items.len == 0) continue;
+            for (signal.when.items) |condition| {
+                if (!hasSelector(expanded.items, condition.selector)) try expanded.append(arena, condition);
+            }
+            signal.when = expanded;
+        }
+    }
+}
+
 fn findValueTable(doc: *const model.Document, name: []const u8) ?[]const model.Choice {
     for (doc.value_tables.items) |table| {
         if (std.mem.eql(u8, table.name, name)) return table.choices.items;
@@ -748,6 +875,14 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         }
         for (message.signals.items) |signal| {
             const sctx: diagnostic.Context = .{ .bus = bus_name, .message = message.name, .signal = signal.name };
+            if (signal.when.items.len > 0) {
+                if (parentCondition(&message, &signal) == null)
+                    try blocker(allocator, diagnostics, "multiplexer conditions cannot be reduced to one DBC parent selector", sctx);
+                for (signal.when.items) |condition| {
+                    if (condition.ranges.items.len == 0)
+                        try blocker(allocator, diagnostics, "multiplexer condition requires at least one range", sctx);
+                }
+            }
             if (signal.unit) |unit| {
                 if (!validDbcString(unit)) try blocker(allocator, diagnostics, "signal unit contains unsupported control characters", sctx);
             }
@@ -777,6 +912,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     var has_mux_values = false;
     var has_float_signals = false;
     var has_message_attributes = doc.attribute_definitions.items.len > 0;
+    var has_value_tables = false;
     for (doc.messages.items) |message| {
         if (message.frame == .fd) has_fd_frames = true;
         if (message.attributes.items.len > 0) has_message_attributes = true;
@@ -784,6 +920,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             if (signal.description != null) has_comments = true;
             if (signal.when.items.len > 0) has_mux_values = true;
             if (signal.signal_type == .float32 or signal.signal_type == .float64) has_float_signals = true;
+            if (signalChoices(doc, signal).len > 0) has_value_tables = true;
         }
     }
     for (doc.nodes.items) |node| {
@@ -793,6 +930,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     if (has_fd_frames or has_message_attributes) try appendText(allocator, &output, "\n  BA_DEF_\n  BA_");
     if (has_mux_values) try appendText(allocator, &output, "\n  SG_MUL_VAL_");
     if (has_float_signals) try appendText(allocator, &output, "\n  SIG_VALTYPE_");
+    if (has_value_tables) try appendText(allocator, &output, "\n  VAL_");
     try appendText(allocator, &output, "\n\nBS_:\n\nBU_:");
     for (doc.nodes.items) |node| try appendFmt(allocator, &output, " {s}", .{node.name});
     try appendText(allocator, &output, "\n\n");
@@ -802,7 +940,16 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         const transmitter = if (message.transmitters.items.len == 0) "Vector__XXX" else message.transmitters.items[0];
         try appendFmt(allocator, &output, "\nBO_ {d} {s}: {d} {s}\n", .{ raw_id, message.name, message.length, transmitter });
         for (message.signals.items) |signal| {
-            const mux_marker: []const u8 = if (signal.is_multiplexer) " M" else "";
+            // External parsers only honour SG_MUL_VAL_ for signals that carry an mN marker.
+            const parent_index = parentCondition(&message, &signal);
+            const mux_marker: []const u8 = if (parent_index) |index| blk: {
+                const first = signal.when.items[index].ranges.items[0].minimum;
+                break :blk if (signal.is_multiplexer)
+                    try std.fmt.allocPrint(allocator, " m{s}M", .{first})
+                else
+                    try std.fmt.allocPrint(allocator, " m{s}", .{first});
+            } else if (signal.is_multiplexer) " M" else "";
+            defer if (parent_index != null) allocator.free(mux_marker);
             const sign: u8 = if (signal.signal_type == .signed) '-' else '+';
             const endian: u8 = if (signal.byte_order == .little_endian) '1' else '0';
             try appendFmt(allocator, &output, " SG_ {s}{s} : {d}|{d}@{c}{c} ({s},{s}) [{s}|{s}] ", .{
@@ -834,7 +981,8 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
         const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
         for (message.signals.items) |signal| {
-            for (signal.when.items) |condition| {
+            if (parentCondition(&message, &signal)) |index| {
+                const condition = signal.when.items[index];
                 try appendFmt(allocator, &output, "SG_MUL_VAL_ {d} {s} {s}", .{ raw_id, signal.name, condition.selector });
                 for (condition.ranges.items, 0..) |range, range_index| {
                     if (range_index > 0) try appendText(allocator, &output, ",");
