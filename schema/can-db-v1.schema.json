@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://can-dbz.dev/schema/can-db-v1.schema.json",
+  "title": "CAN JSON v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "messages"],
+  "properties": {
+    "format": { "const": "can-db" },
+    "format_version": { "const": 1 },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "buses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "nominal_bitrate": { "type": "integer", "minimum": 0 },
+          "data_bitrate": { "type": "integer", "minimum": 0 },
+          "protocol": { "type": "string" },
+          "description": { "type": "string" },
+          "attributes": { "$ref": "#/$defs/attributes" },
+          "dbc": { "type": "object" },
+          "extensions": { "type": "object" }
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "attributes": { "$ref": "#/$defs/attributes" },
+          "dbc": { "type": "object" },
+          "extensions": { "type": "object" }
+        }
+      }
+    },
+    "attribute_definitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "scope", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "scope": { "enum": ["document", "bus", "node", "message", "signal"] },
+          "type": { "enum": ["integer", "hex", "float", "string", "enum"] },
+          "minimum": { "type": "string" },
+          "maximum": { "type": "string" },
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "default": { "type": "string" },
+          "dbc": { "type": "object" },
+          "extensions": { "type": "object" }
+        }
+      }
+    },
+    "value_tables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/value_table" }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "bus", "id", "extended", "frame", "length", "signals"],
+        "properties": {
+          "name": { "type": "string" },
+          "bus": { "type": "string" },
+          "id": { "type": "string", "pattern": "^0[xX][0-9A-Fa-f]+$" },
+          "extended": { "type": "boolean" },
+          "frame": { "enum": ["classic", "fd"] },
+          "length": { "type": "integer", "minimum": 0, "maximum": 64 },
+          "description": { "type": "string" },
+          "transmitters": { "type": "array", "items": { "type": "string" } },
+          "receivers": { "type": "array", "items": { "type": "string" } },
+          "signals": { "type": "array", "items": { "$ref": "#/$defs/signal" } },
+          "attributes": { "$ref": "#/$defs/attributes" },
+          "dbc": { "type": "object" },
+          "extensions": { "type": "object" }
+        }
+      }
+    },
+    "dbc": { "type": "object" },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "attributes": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "label"],
+      "properties": {
+        "raw": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "value_table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "choices"],
+      "properties": {
+        "name": { "type": "string" },
+        "choices": { "type": "array", "items": { "$ref": "#/$defs/choice" } }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "start_bit", "bit_length", "byte_order", "type"],
+      "properties": {
+        "name": { "type": "string" },
+        "start_bit": { "type": "integer", "minimum": 0 },
+        "bit_length": { "type": "integer", "minimum": 1 },
+        "byte_order": { "enum": ["little_endian", "big_endian"] },
+        "type": { "enum": ["unsigned", "signed", "float32", "float64"] },
+        "description": { "type": "string" },
+        "unit": { "type": "string" },
+        "factor": { "type": "string" },
+        "offset": { "type": "string" },
+        "minimum": { "type": "string" },
+        "maximum": { "type": "string" },
+        "receivers": { "type": "array", "items": { "type": "string" } },
+        "is_multiplexer": { "type": "boolean" },
+        "when": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["selector", "ranges"],
+            "properties": {
+              "selector": { "type": "string" },
+              "ranges": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            }
+          }
+        },
+        "choices": { "type": "array", "items": { "$ref": "#/$defs/choice" } },
+        "value_table": { "type": "string" },
+        "attributes": { "$ref": "#/$defs/attributes" },
+        "dbc": { "type": "object" },
+        "extensions": { "type": "object" }
+      }
+    }
+  }
+}

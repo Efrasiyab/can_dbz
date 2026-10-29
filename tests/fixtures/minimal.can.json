@@ -1,0 +1,10 @@
+{
+  "format": "can-db",
+  "format_version": 1,
+  "buses": [
+    {
+      "name": "can0"
+    }
+  ],
+  "messages": []
+}

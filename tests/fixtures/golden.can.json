@@ -1,0 +1,56 @@
+{
+  "format": "can-db",
+  "format_version": 1,
+  "name": "Codec coverage",
+  "buses": [{ "name": "can0" }],
+  "messages": [
+    {
+      "name": "FdAndMux",
+      "bus": "can0",
+      "id": "0x18FF50E5",
+      "extended": true,
+      "frame": "fd",
+      "length": 64,
+      "signals": [
+        {
+          "name": "Page",
+          "start_bit": 0,
+          "bit_length": 8,
+          "byte_order": "little_endian",
+          "type": "unsigned",
+          "is_multiplexer": true
+        },
+        {
+          "name": "LittleNineByteSpan",
+          "start_bit": 56,
+          "bit_length": 64,
+          "byte_order": "little_endian",
+          "type": "unsigned"
+        },
+        {
+          "name": "BigEndian12",
+          "start_bit": 127,
+          "bit_length": 12,
+          "byte_order": "big_endian",
+          "type": "unsigned"
+        },
+        {
+          "name": "BranchZero",
+          "start_bit": 160,
+          "bit_length": 8,
+          "byte_order": "little_endian",
+          "type": "signed",
+          "when": [{ "selector": "Page", "ranges": [["0", "0"]] }]
+        },
+        {
+          "name": "BranchOne",
+          "start_bit": 160,
+          "bit_length": 8,
+          "byte_order": "little_endian",
+          "type": "signed",
+          "when": [{ "selector": "Page", "ranges": [["1", "1"]] }]
+        }
+      ]
+    }
+  ]
+}

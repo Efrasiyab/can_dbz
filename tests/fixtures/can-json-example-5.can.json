@@ -1,0 +1,50 @@
+{
+    "format": "can-db",
+    "format_version": 1,
+    "name": "FdDemo",
+    "buses": [
+        {
+            "name": "can0"
+        }
+    ],
+    "messages": [
+        {
+            "name": "SensorSnapshot",
+            "bus": "can0",
+            "id": "0x18FF50E5",
+            "extended": true,
+            "frame": "fd",
+            "length": 64,
+            "signals": [
+                {
+                    "name": "TimestampMs",
+                    "start_bit": 0,
+                    "bit_length": 32,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "minimum": "0",
+                    "maximum": "4294967295",
+                    "unit": "ms"
+                },
+                {
+                    "name": "AccelX",
+                    "start_bit": 32,
+                    "bit_length": 32,
+                    "byte_order": "little_endian",
+                    "type": "float32",
+                    "unit": "m/s^2"
+                },
+                {
+                    "name": "BlobCounter",
+                    "description": "Demonstrates a 64-bit unsigned raw value.",
+                    "start_bit": 256,
+                    "bit_length": 64,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "minimum": "0",
+                    "maximum": "18446744073709551615"
+                }
+            ]
+        }
+    ]
+}

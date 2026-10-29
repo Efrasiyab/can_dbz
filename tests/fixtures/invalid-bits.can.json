@@ -1,0 +1,1 @@
+{"format":"can-db","format_version":1,"buses":[{"name":"can0"}],"messages":[{"name":"BadBits","bus":"can0","id":"0x123","extended":false,"frame":"classic","length":8,"signals":[{"name":"PastEnd","start_bit":63,"bit_length":2,"byte_order":"little_endian","type":"unsigned"}]}]}

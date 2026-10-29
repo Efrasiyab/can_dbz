@@ -1,0 +1,1 @@
+{"format":"can-db","format_version":1,"buses":[{"name":"can0"}],"messages":[{"name":"BadId","bus":"can0","id":"123","extended":false,"frame":"classic","length":1,"signals":[]}]}

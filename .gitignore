@@ -1,0 +1,21 @@
+.zig-cache/
+
+# Editor and dev-container configuration
+.vscode/
+.devcontainer/
+
+# AI tool working directories
+.agents/
+.aws/
+.codex/
+zig-cache/
+zig-out/
+
+# Editor and dev-container configuration
+.vscode/
+.devcontainer/
+
+# AI tool working directories
+.agents/
+.aws/
+.codex/

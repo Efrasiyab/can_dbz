@@ -1,0 +1,111 @@
+{
+    "format": "can-db",
+    "format_version": 1,
+    "name": "NestedMux",
+    "buses": [
+        {
+            "name": "can0"
+        }
+    ],
+    "messages": [
+        {
+            "name": "ServiceResponse",
+            "bus": "can0",
+            "id": "0x400",
+            "extended": false,
+            "frame": "classic",
+            "length": 8,
+            "signals": [
+                {
+                    "name": "Service",
+                    "start_bit": 0,
+                    "bit_length": 8,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "is_multiplexer": true,
+                    "choices": [
+                        {
+                            "raw": "1",
+                            "label": "Read"
+                        },
+                        {
+                            "raw": "2",
+                            "label": "Write"
+                        }
+                    ]
+                },
+                {
+                    "name": "SubId",
+                    "start_bit": 8,
+                    "bit_length": 8,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "is_multiplexer": true
+                },
+                {
+                    "name": "ReadValue",
+                    "start_bit": 16,
+                    "bit_length": 16,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "when": [
+                        {
+                            "selector": "Service",
+                            "ranges": [
+                                [
+                                    "1",
+                                    "1"
+                                ]
+                            ]
+                        },
+                        {
+                            "selector": "SubId",
+                            "ranges": [
+                                [
+                                    "10",
+                                    "10"
+                                ],
+                                [
+                                    "11",
+                                    "11"
+                                ]
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "WriteStatus",
+                    "start_bit": 16,
+                    "bit_length": 8,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "when": [
+                        {
+                            "selector": "Service",
+                            "ranges": [
+                                [
+                                    "2",
+                                    "2"
+                                ]
+                            ]
+                        }
+                    ],
+                    "choices": [
+                        {
+                            "raw": "0",
+                            "label": "OK"
+                        },
+                        {
+                            "raw": "1",
+                            "label": "Denied"
+                        },
+                        {
+                            "raw": "2",
+                            "label": "Busy"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

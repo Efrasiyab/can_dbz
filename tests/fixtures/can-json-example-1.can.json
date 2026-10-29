@@ -1,0 +1,71 @@
+{
+    "format": "can-db",
+    "format_version": 1,
+    "name": "Powertrain",
+    "description": "Small example edited by humans.",
+    "buses": [
+        {
+            "name": "can0"
+        }
+    ],
+    "nodes": [
+        {
+            "name": "ECU"
+        },
+        {
+            "name": "Dashboard"
+        }
+    ],
+    "messages": [
+        {
+            "name": "EngineStatus",
+            "bus": "can0",
+            "id": "0x123",
+            "extended": false,
+            "frame": "classic",
+            "length": 8,
+            "transmitters": [
+                "ECU"
+            ],
+            "signals": [
+                {
+                    "name": "EngineSpeed",
+                    "description": "Crankshaft speed",
+                    "start_bit": 0,
+                    "bit_length": 16,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "factor": "0.125",
+                    "offset": "0",
+                    "minimum": "0",
+                    "maximum": "8000",
+                    "unit": "rpm",
+                    "receivers": [
+                        "Dashboard"
+                    ]
+                },
+                {
+                    "name": "State",
+                    "start_bit": 16,
+                    "bit_length": 2,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "choices": [
+                        {
+                            "raw": "0",
+                            "label": "Stopped"
+                        },
+                        {
+                            "raw": "1",
+                            "label": "Running"
+                        },
+                        {
+                            "raw": "2",
+                            "label": "Cranking"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

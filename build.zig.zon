@@ -1,0 +1,19 @@
+.{
+    .name = .can_dbz,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0xf93371da8a74551e,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "bench.zig",
+        "src",
+        "tests",
+        "schema_test.zig",
+        "docs",
+        "schema",
+        "README.md",
+        "LICENSE",
+    },
+}

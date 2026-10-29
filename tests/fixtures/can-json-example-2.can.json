@@ -1,0 +1,48 @@
+{
+    "format": "can-db",
+    "format_version": 1,
+    "name": "EndianDemo",
+    "buses": [
+        {
+            "name": "can0"
+        }
+    ],
+    "messages": [
+        {
+            "name": "MotorolaExample",
+            "bus": "can0",
+            "id": "0x200",
+            "extended": false,
+            "frame": "classic",
+            "length": 2,
+            "signals": [
+                {
+                    "name": "BE_u16",
+                    "description": "Big endian 16-bit value starting at bit 7 (occupies byte0+byte1).",
+                    "start_bit": 7,
+                    "bit_length": 16,
+                    "byte_order": "big_endian",
+                    "type": "unsigned"
+                }
+            ]
+        },
+        {
+            "name": "IntelExample",
+            "bus": "can0",
+            "id": "0x201",
+            "extended": false,
+            "frame": "classic",
+            "length": 2,
+            "signals": [
+                {
+                    "name": "LE_u16",
+                    "description": "Little endian 16-bit value starting at bit 0 (also occupies byte0+byte1).",
+                    "start_bit": 0,
+                    "bit_length": 16,
+                    "byte_order": "little_endian",
+                    "type": "unsigned"
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,76 @@
+{
+    "format": "can-db",
+    "format_version": 1,
+    "name": "AttrsAndTables",
+    "buses": [
+        {
+            "name": "can0"
+        }
+    ],
+    "attribute_definitions": [
+        {
+            "name": "GenMsgCycleTime",
+            "scope": "message",
+            "type": "integer",
+            "minimum": "0",
+            "maximum": "65535",
+            "default": "0"
+        }
+    ],
+    "value_tables": [
+        {
+            "name": "OnOff",
+            "choices": [
+                {
+                    "raw": "0",
+                    "label": "Off"
+                },
+                {
+                    "raw": "1",
+                    "label": "On"
+                }
+            ]
+        }
+    ],
+    "messages": [
+        {
+            "name": "Lights",
+            "bus": "can0",
+            "id": "0x500",
+            "extended": false,
+            "frame": "classic",
+            "length": 1,
+            "attributes": {
+                "GenMsgCycleTime": "100"
+            },
+            "signals": [
+                {
+                    "name": "Headlights",
+                    "start_bit": 0,
+                    "bit_length": 1,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "value_table": "OnOff"
+                },
+                {
+                    "name": "Hazards",
+                    "start_bit": 1,
+                    "bit_length": 1,
+                    "byte_order": "little_endian",
+                    "type": "unsigned",
+                    "value_table": "OnOff"
+                }
+            ]
+        }
+    ],
+    "dbc": {
+        "version": "1.0",
+        "notes": "Example of a DBC-only metadata namespace; fields are not yet standardized."
+    },
+    "extensions": {
+        "example": {
+            "source": "handwritten",
+            "last_reviewed": "2026-10-27"
+        }
+    }
+}
