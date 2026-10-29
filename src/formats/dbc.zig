@@ -203,6 +203,8 @@ fn parseLine(
     }
     if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "SG_"))
         return parseSignalComment(doc, tokens, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "BU_"))
+        return parseNodeComment(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SG_MUL_VAL_"))
         return parseSignalMultiplexerValues(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SIG_VALTYPE_"))
@@ -368,6 +370,24 @@ fn parseSignalComment(
         return lineError(allocator, diagnostics, tokens[3], "signal comment references an unknown signal");
     }
     return lineError(allocator, diagnostics, tokens[2], "signal comment references an unknown message");
+}
+
+fn parseNodeComment(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len != 5 or tokens[2].kind != .word or tokens[3].kind != .string or !std.mem.eql(u8, tokens[4].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed node comment");
+    for (doc.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.name, tokens[2].text)) continue;
+        if (node.description != null) return lineError(allocator, diagnostics, tokens[0], "duplicate node comment");
+        node.description = decodeDbcString(doc.allocator(), tokens[3].text) catch
+            return lineError(allocator, diagnostics, tokens[3], "invalid DBC string escape");
+        return;
+    }
+    return lineError(allocator, diagnostics, tokens[2], "node comment references an unknown node");
 }
 
 fn parseSignalValues(
@@ -699,7 +719,9 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     }
     for (doc.nodes.items) |node| {
         if (!isIdentifier(node.name)) try blocker(allocator, diagnostics, "node name is not a valid DBC identifier", .{});
-        if (node.description != null) try blocker(allocator, diagnostics, "node description cannot be exported", .{});
+        if (node.description) |description| {
+            if (!validDbcString(description)) try blocker(allocator, diagnostics, "node description contains unsupported control characters", .{});
+        }
         if (node.attributes.items.len > 0) try blocker(allocator, diagnostics, "node attributes cannot be exported", .{});
         if (node.dbc != null or node.extensions != null) try blocker(allocator, diagnostics, "node dbc metadata and extensions cannot be exported", .{});
     }
@@ -750,7 +772,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     try appendText(allocator, &output, "VERSION ");
     try appendDbcString(allocator, &output, version);
     try appendText(allocator, &output, "\n\nNS_ :");
-    var has_signal_comments = false;
+    var has_comments = false;
     var has_fd_frames = false;
     var has_mux_values = false;
     var has_float_signals = false;
@@ -759,12 +781,15 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         if (message.frame == .fd) has_fd_frames = true;
         if (message.attributes.items.len > 0) has_message_attributes = true;
         for (message.signals.items) |signal| {
-            if (signal.description != null) has_signal_comments = true;
+            if (signal.description != null) has_comments = true;
             if (signal.when.items.len > 0) has_mux_values = true;
             if (signal.signal_type == .float32 or signal.signal_type == .float64) has_float_signals = true;
         }
     }
-    if (has_signal_comments) try appendText(allocator, &output, "\n  CM_");
+    for (doc.nodes.items) |node| {
+        if (node.description != null) has_comments = true;
+    }
+    if (has_comments) try appendText(allocator, &output, "\n  CM_");
     if (has_fd_frames or has_message_attributes) try appendText(allocator, &output, "\n  BA_DEF_\n  BA_");
     if (has_mux_values) try appendText(allocator, &output, "\n  SG_MUL_VAL_");
     if (has_float_signals) try appendText(allocator, &output, "\n  SIG_VALTYPE_");
@@ -835,6 +860,13 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
                 }
                 try appendText(allocator, &output, ";\n");
             }
+        }
+    }
+    for (doc.nodes.items) |node| {
+        if (node.description) |description| {
+            try appendFmt(allocator, &output, "CM_ BU_ {s} ", .{node.name});
+            try appendDbcString(allocator, &output, description);
+            try appendText(allocator, &output, ";\n");
         }
     }
     if (has_fd_frames) {

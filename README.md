@@ -66,7 +66,7 @@ A [Containerfile](Containerfile) with the pinned Zig toolchain is provided for a
 
 Nothing below is implemented or promised; it records the intended direction.
 
-- **Broader DBC coverage:** comment scopes beyond signal `CM_`, `VAL_TABLE_`, attribute types/scopes beyond bounded message integers, signal groups, environment variables, and relationship metadata — each with structured storage and writers before being claimed as supported.
+- **Broader DBC coverage:** comment scopes beyond node and signal `CM_`, `VAL_TABLE_`, attribute types/scopes beyond bounded message integers, signal groups, environment variables, and relationship metadata — each with structured storage and writers before being claimed as supported.
 - **Long names:** DBC long-name handling that keeps original names.
 - **Safer round trips:** export reports listing anything lossy and refusal of lossy export by default; validation of DBC identifier rules, escaping and encodings; rejecting preserved opaque statements whose validity cannot be established after edits; atomic output file replacement. Semantic equivalence (not byte-identical text) is the intended guarantee for the supported profile; byte-identical regeneration would need a separate concrete-syntax-tree editor and is out of scope.
 - **Multi-bus databases:** DBC export of one selected bus, rejecting ambiguous multi-bus exports.

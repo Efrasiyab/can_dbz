@@ -73,6 +73,21 @@ test "CAN JSON examples export according to the DBC support profile" {
     try std.testing.expect(golden_exported.messages.items[0].extended);
 }
 
+test "node description DBC fixture imports and exports with escaping" {
+    var diagnostics: std.ArrayListUnmanaged(can_dbz.diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try can_dbz.formats.dbc.parse(std.testing.allocator, @embedFile("fixtures/node-description.dbc"), &diagnostics);
+    defer doc.deinit();
+    const description = "quoted \"node\" and \\ path";
+    try std.testing.expectEqualStrings(description, doc.nodes.items[0].description.?);
+
+    const output = try can_dbz.formats.dbc.write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    var reparsed = try can_dbz.formats.dbc.parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings(description, reparsed.nodes.items[0].description.?);
+}
+
 test "all complete CAN JSON guide examples export to DBC" {
     const examples = [_][]const u8{
         @embedFile("fixtures/can-json-quick-start.can.json"),
