@@ -981,31 +981,9 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
         const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
         for (message.signals.items) |signal| {
-            if (parentCondition(&message, &signal)) |index| {
-                const condition = signal.when.items[index];
-                try appendFmt(allocator, &output, "SG_MUL_VAL_ {d} {s} {s}", .{ raw_id, signal.name, condition.selector });
-                for (condition.ranges.items, 0..) |range, range_index| {
-                    if (range_index > 0) try appendText(allocator, &output, ",");
-                    try appendFmt(allocator, &output, " {s}-{s}", .{ range.minimum, range.maximum });
-                }
-                try appendText(allocator, &output, ";\n");
-            }
             if (signal.description) |description| {
                 try appendFmt(allocator, &output, "CM_ SG_ {d} {s} ", .{ raw_id, signal.name });
                 try appendDbcString(allocator, &output, description);
-                try appendText(allocator, &output, ";\n");
-            }
-            if (signal.signal_type == .float32 or signal.signal_type == .float64) {
-                const value_type: u8 = if (signal.signal_type == .float32) 1 else 2;
-                try appendFmt(allocator, &output, "SIG_VALTYPE_ {d} {s} : {d};\n", .{ raw_id, signal.name, value_type });
-            }
-            const choices = signalChoices(doc, signal);
-            if (choices.len > 0) {
-                try appendFmt(allocator, &output, "VAL_ {d} {s}", .{ raw_id, signal.name });
-                for (choices) |choice| {
-                    try appendFmt(allocator, &output, " {s} ", .{choice.raw});
-                    try appendDbcString(allocator, &output, choice.label);
-                }
                 try appendText(allocator, &output, ";\n");
             }
         }
@@ -1024,6 +1002,8 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         try appendText(allocator, &output, "BA_DEF_ BO_ ");
         try appendDbcString(allocator, &output, definition.name);
         try appendFmt(allocator, &output, " INT {s} {s};\n", .{ definition.minimum.?, definition.maximum.? });
+    }
+    for (doc.attribute_definitions.items) |definition| {
         if (definition.default) |default| {
             try appendText(allocator, &output, "BA_DEF_DEF_ ");
             try appendDbcString(allocator, &output, definition.name);
@@ -1046,6 +1026,44 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             try appendText(allocator, &output, "BA_ ");
             try appendDbcString(allocator, &output, assignment.name);
             try appendFmt(allocator, &output, " BO_ {d} {s};\n", .{ raw_id, assignment.value.integer });
+        }
+    }
+    // Section order follows the DBC grammar; Vector's CANdb++ rejects later records that appear early.
+    for (doc.messages.items) |message| {
+        const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
+        const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
+        for (message.signals.items) |signal| {
+            const choices = signalChoices(doc, signal);
+            if (choices.len == 0) continue;
+            try appendFmt(allocator, &output, "VAL_ {d} {s}", .{ raw_id, signal.name });
+            for (choices) |choice| {
+                try appendFmt(allocator, &output, " {s} ", .{choice.raw});
+                try appendDbcString(allocator, &output, choice.label);
+            }
+            try appendText(allocator, &output, ";\n");
+        }
+    }
+    for (doc.messages.items) |message| {
+        const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
+        const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
+        for (message.signals.items) |signal| {
+            if (signal.signal_type != .float32 and signal.signal_type != .float64) continue;
+            const value_type: u8 = if (signal.signal_type == .float32) 1 else 2;
+            try appendFmt(allocator, &output, "SIG_VALTYPE_ {d} {s} : {d};\n", .{ raw_id, signal.name, value_type });
+        }
+    }
+    for (doc.messages.items) |message| {
+        const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
+        const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
+        for (message.signals.items) |signal| {
+            const index = parentCondition(&message, &signal) orelse continue;
+            const condition = signal.when.items[index];
+            try appendFmt(allocator, &output, "SG_MUL_VAL_ {d} {s} {s}", .{ raw_id, signal.name, condition.selector });
+            for (condition.ranges.items, 0..) |range, range_index| {
+                if (range_index > 0) try appendText(allocator, &output, ",");
+                try appendFmt(allocator, &output, " {s}-{s}", .{ range.minimum, range.maximum });
+            }
+            try appendText(allocator, &output, ";\n");
         }
     }
     if (opaque_statements) |statements| {

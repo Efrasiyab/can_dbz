@@ -122,6 +122,12 @@ test "all complete CAN JSON guide examples export to DBC" {
         defer diagnostics.deinit(std.testing.allocator);
         const dbc_bytes = try can_dbz.formats.dbc.writeWithDiagnostics(std.testing.allocator, &doc, &diagnostics);
         defer std.testing.allocator.free(dbc_bytes);
+        if (doc.name != null and std.mem.eql(u8, doc.name.?, "FdDemo")) {
+            const comment = std.mem.indexOf(u8, dbc_bytes, "\nCM_ SG_ ").?;
+            const frame_format = std.mem.indexOf(u8, dbc_bytes, "\nBA_ \"VFrameFormat\"").?;
+            const value_type = std.mem.indexOf(u8, dbc_bytes, "\nSIG_VALTYPE_ ").?;
+            try std.testing.expect(comment < frame_format and frame_format < value_type);
+        }
         if (doc.name != null and std.mem.eql(u8, doc.name.?, "NestedMux")) {
             try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "\n  VAL_\n") != null);
             try std.testing.expect(std.mem.indexOf(u8, dbc_bytes, "SG_ SubId m1M :") != null);
