@@ -49,6 +49,7 @@ pub const Code = enum {
     invalid_decimal_value,
     invalid_physical_bounds,
     unsupported_dbc_export,
+    dbc_independent_signals_skipped,
 };
 
 pub const SourceRef = union(enum) {

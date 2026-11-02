@@ -13,6 +13,7 @@ pub const Token = struct {
     kind: TokenKind,
     text: []const u8,
     line: u32,
+    end_line: u32,
     column: u32,
 };
 
@@ -51,7 +52,12 @@ pub const Lexer = struct {
             self.offset += 1;
             self.column += 1;
             while (self.offset < self.input.len and self.input[self.offset] != '"') {
-                if (self.input[self.offset] == '\n') return error.InvalidDbc;
+                if (self.input[self.offset] == '\n') {
+                    self.offset += 1;
+                    self.line += 1;
+                    self.column = 1;
+                    continue;
+                }
                 if (self.input[self.offset] == '\\') {
                     if (self.offset + 1 == self.input.len or self.input[self.offset + 1] == '\n') return error.InvalidDbc;
                     self.offset += 2;
@@ -65,22 +71,41 @@ pub const Lexer = struct {
             const text = self.input[start + 1 .. self.offset];
             self.offset += 1;
             self.column += 1;
-            return .{ .kind = .string, .text = text, .line = token_line, .column = token_column };
+            return .{ .kind = .string, .text = text, .line = token_line, .end_line = self.line, .column = token_column };
         }
         if (std.mem.indexOfScalar(u8, ":|@+-,()[];", first) != null) {
             self.offset += 1;
             self.column += 1;
-            return .{ .kind = .punctuation, .text = self.input[start..self.offset], .line = token_line, .column = token_column };
+            return .{ .kind = .punctuation, .text = self.input[start..self.offset], .line = token_line, .end_line = token_line, .column = token_column };
         }
         while (self.offset < self.input.len) {
             const ch = self.input[self.offset];
+            const following: ?u8 = if (self.offset + 1 < self.input.len) self.input[self.offset + 1] else null;
+            if (continuesExponent(self.input[start..self.offset], ch, following)) {
+                self.offset += 1;
+                self.column += 1;
+                continue;
+            }
             if (std.ascii.isWhitespace(ch) or ch == '"' or std.mem.indexOfScalar(u8, ":|@+-,()[];", ch) != null) break;
             self.offset += 1;
             self.column += 1;
         }
-        return .{ .kind = .word, .text = self.input[start..self.offset], .line = token_line, .column = token_column };
+        return .{ .kind = .word, .text = self.input[start..self.offset], .line = token_line, .end_line = token_line, .column = token_column };
     }
 };
+
+/// Keeps the sign of `1.5E+019` inside one number token instead of splitting it as punctuation.
+fn continuesExponent(word: []const u8, sign: u8, following: ?u8) bool {
+    if ((sign != '+' and sign != '-') or word.len < 2) return false;
+    if (word[word.len - 1] != 'e' and word[word.len - 1] != 'E') return false;
+    var has_digit = false;
+    for (word[0 .. word.len - 1]) |character| {
+        if (std.ascii.isDigit(character)) {
+            has_digit = true;
+        } else if (character != '.') return false;
+    }
+    return has_digit and following != null and std.ascii.isDigit(following.?);
+}
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic)) Error!model.Document {
     return parseWithOptions(allocator, bytes, diagnostics, .{});
@@ -103,6 +128,7 @@ pub fn parseWithOptions(
     var current_line: std.ArrayListUnmanaged(Token) = .empty;
     defer current_line.deinit(a);
     var line_number: u32 = 1;
+    var statement_end: u32 = 1;
     while (true) {
         const maybe_token = lexer.next() catch {
             try diagnostics.append(allocator, .{
@@ -114,7 +140,7 @@ pub fn parseWithOptions(
             return error.InvalidDbc;
         };
         const token = maybe_token orelse break;
-        if (token.line != line_number) {
+        if (current_line.items.len > 0 and token.line != statement_end) {
             try parseLine(
                 &doc,
                 &current_message,
@@ -122,15 +148,16 @@ pub fn parseWithOptions(
                 &frame_format_definition,
                 &in_namespace_listing,
                 current_line.items,
-                rawLine(bytes, line_number),
+                rawStatement(bytes, line_number, statement_end),
                 options,
                 allocator,
                 diagnostics,
             );
             current_line.clearRetainingCapacity();
-            line_number = token.line;
         }
+        if (current_line.items.len == 0) line_number = token.line;
         try current_line.append(a, token);
+        statement_end = token.end_line;
     }
     if (current_line.items.len > 0) {
         try parseLine(
@@ -140,7 +167,7 @@ pub fn parseWithOptions(
             &frame_format_definition,
             &in_namespace_listing,
             current_line.items,
-            rawLine(bytes, line_number),
+            rawStatement(bytes, line_number, statement_end),
             options,
             allocator,
             diagnostics,
@@ -168,6 +195,25 @@ const FrameFormatDefinition = struct {
     fd_values: std.ArrayListUnmanaged(u16) = .empty,
 };
 
+/// Vector's container for signals not assigned to any frame; the model has no place for them.
+const independent_message_id: u32 = 0xC0000000;
+const independent_message: usize = std.math.maxInt(usize);
+
+fn referencesIndependentMessage(tokens: []const Token) bool {
+    if (tokens.len < 2) return false;
+    const keyword = tokens[0].text;
+    var id_index: usize = 0;
+    if (std.mem.eql(u8, keyword, "VAL_") or std.mem.eql(u8, keyword, "SG_MUL_VAL_") or std.mem.eql(u8, keyword, "SIG_VALTYPE_")) {
+        id_index = 1;
+    } else if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 2 and (std.mem.eql(u8, tokens[1].text, "BO_") or std.mem.eql(u8, tokens[1].text, "SG_"))) {
+        id_index = 2;
+    } else if (std.mem.eql(u8, keyword, "BA_") and tokens.len > 3 and (std.mem.eql(u8, tokens[2].text, "BO_") or std.mem.eql(u8, tokens[2].text, "SG_"))) {
+        id_index = 3;
+    } else return false;
+    const raw_id = std.fmt.parseInt(u32, tokens[id_index].text, 10) catch return false;
+    return raw_id == independent_message_id;
+}
+
 fn parseLine(
     doc: *model.Document,
     current_message: *?usize,
@@ -193,6 +239,7 @@ fn parseLine(
         return;
     }
     if (in_namespace_listing.*) return;
+    if (referencesIndependentMessage(tokens)) return;
     if (std.mem.eql(u8, keyword, "VERSION")) {
         if (tokens.len != 2 or tokens[1].kind != .string)
             return lineError(allocator, diagnostics, tokens[0], "VERSION requires a quoted version string");
@@ -245,6 +292,17 @@ fn parseLine(
             return lineError(allocator, diagnostics, tokens[0], "malformed BO_ message declaration");
         const raw_id = std.fmt.parseInt(u32, tokens[1].text, 10) catch
             return lineError(allocator, diagnostics, tokens[1], "invalid DBC message identifier");
+        if (raw_id == independent_message_id) {
+            current_message.* = independent_message;
+            last_mux.* = null;
+            try diagnostics.append(allocator, .{
+                .severity = .warning,
+                .code = .dbc_independent_signals_skipped,
+                .message = "Vector independent-signal pseudo-message and its signals are skipped",
+                .source = .{ .dbc = .{ .line = tokens[0].line, .column = tokens[0].column } },
+            });
+            return;
+        }
         const extended = raw_id & 0x80000000 != 0;
         const id = raw_id & 0x1fffffff;
         const length = std.fmt.parseInt(u16, tokens[4].text, 10) catch
@@ -271,6 +329,7 @@ fn parseLine(
     }
     if (std.mem.eql(u8, keyword, "SG_")) {
         const message_index = current_message.* orelse return lineError(allocator, diagnostics, tokens[0], "SG_ signal must follow a BO_ message");
+        if (message_index == independent_message) return;
         var i: usize = 1;
         if (i >= tokens.len) return lineError(allocator, diagnostics, tokens[0], "missing signal name");
         const name = tokens[i].text;
@@ -970,7 +1029,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
                 try appendText(allocator, &output, " Vector__XXX\n");
             } else {
                 for (signal.receivers.items, 0..) |receiver, receiver_index| {
-                    if (receiver_index > 0) try appendText(allocator, &output, " ");
+                    if (receiver_index > 0) try appendText(allocator, &output, ",");
                     try appendText(allocator, &output, receiver);
                 }
                 try appendText(allocator, &output, "\n");
@@ -1121,9 +1180,8 @@ fn appendDbcString(allocator: std.mem.Allocator, output: *std.ArrayListUnmanaged
         switch (character) {
             '"' => try appendText(allocator, output, "\\\""),
             '\\' => try appendText(allocator, output, "\\\\"),
-            '\n' => try appendText(allocator, output, "\\n"),
-            '\r' => try appendText(allocator, output, "\\r"),
-            '\t' => try appendText(allocator, output, "\\t"),
+            // DBC strings carry line breaks and tabs literally; there is no \n escape.
+            '\n', '\r', '\t' => try output.append(allocator, character),
             else => {
                 if (character < 0x20) return error.InvalidDbc;
                 try output.append(allocator, character);
@@ -1138,7 +1196,7 @@ fn validOpaqueStatement(statement: std.json.Value) bool {
     const raw = statement.object.get("raw") orelse return false;
     const line = statement.object.get("line") orelse return false;
     if (raw != .string or !isPositiveInteger(line)) return false;
-    if (std.mem.indexOfAny(u8, raw.string, "\r\n") != null or raw.string.len == 0) return false;
+    if (raw.string.len == 0) return false;
     return statement.object.count() == 2;
 }
 
@@ -1158,15 +1216,20 @@ fn isPositiveInteger(value: std.json.Value) bool {
     };
 }
 
-fn rawLine(input: []const u8, line_number: u32) []const u8 {
+fn rawStatement(input: []const u8, first_line: u32, last_line: u32) []const u8 {
     var line: u32 = 1;
     var start: usize = 0;
-    while (line < line_number and start < input.len) : (start += 1) {
+    while (line < first_line and start < input.len) : (start += 1) {
         if (input[start] == '\n') line += 1;
     }
     if (start >= input.len) return "";
     var end = start;
-    while (end < input.len and input[end] != '\n') : (end += 1) {}
+    var current = first_line;
+    while (end < input.len) : (end += 1) {
+        if (input[end] != '\n') continue;
+        if (current >= last_line) break;
+        current += 1;
+    }
     if (end > start and input[end - 1] == '\r') end -= 1;
     return input[start..end];
 }
@@ -1307,6 +1370,106 @@ test "signal comments import and export with DBC string escaping" {
     var reparsed = try parse(std.testing.allocator, output, &diagnostics);
     defer reparsed.deinit();
     try std.testing.expectEqualStrings(description, reparsed.messages.items[0].signals.items[0].description.?);
+}
+
+test "multiple signal receivers are comma separated" {
+    const source =
+        \\BU_: ECU DASH TS
+        \\BO_ 1 M: 1 ECU
+        \\ SG_ Value : 0|8@1+ (1,0) [0|255] "" DASH,TS
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 2), doc.messages.items[0].signals.items[0].receivers.items.len);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"\" DASH,TS\n") != null);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), reparsed.messages.items[0].signals.items[0].receivers.items.len);
+}
+
+test "exponent notation numbers stay one token and round-trip" {
+    const source =
+        \\BO_ 1 M: 8 ECU
+        \\ SG_ Flags : 0|64@1+ (1,0) [0|1.84467440737096E+019] "" ECU
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("1.84467440737096E+019", doc.messages.items[0].signals.items[0].maximum.?);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("1.84467440737096E+019", reparsed.messages.items[0].signals.items[0].maximum.?);
+}
+
+test "multi-line comments stay one statement and are preserved verbatim" {
+    const source = "BO_ 1 M: 1 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nCM_ BO_ 1 \"first line\r\nperiod: 100ms\";\r\nFOO_ after;\r\n";
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 3), diagnostics.items[0].source.dbc.line);
+
+    var doc = try parseWithOptions(std.testing.allocator, source, &diagnostics, .{ .preserve_unsupported_statements = true });
+    defer doc.deinit();
+    const statements = doc.dbc.?.object.get("opaque_statements").?.array;
+    try std.testing.expectEqual(@as(usize, 2), statements.items.len);
+    try std.testing.expectEqualStrings("CM_ BO_ 1 \"first line\r\nperiod: 100ms\";", statements.items[0].object.get("raw").?.string);
+    try std.testing.expectEqual(@as(i64, 3), statements.items[0].object.get("line").?.integer);
+    try std.testing.expectEqualStrings("FOO_ after;", statements.items[1].object.get("raw").?.string);
+    try std.testing.expectEqual(@as(i64, 5), statements.items[1].object.get("line").?.integer);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    var reparsed = try parseWithOptions(std.testing.allocator, output, &diagnostics, .{ .preserve_unsupported_statements = true });
+    defer reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), reparsed.dbc.?.object.get("opaque_statements").?.array.items.len);
+}
+
+test "descriptions with line breaks are written as literal line breaks" {
+    const source = "BO_ 1 M: 1 ECU\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\nCM_ SG_ 1 Value \"line one\nline two\";\n";
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("line one\nline two", doc.messages.items[0].signals.items[0].description.?);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"line one\nline two\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\n") == null);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("line one\nline two", reparsed.messages.items[0].signals.items[0].description.?);
+}
+
+test "Vector independent-signal pseudo-message is skipped with a warning" {
+    const source =
+        \\BO_ 3221225472 VECTOR__INDEPENDENT_SIG_MSG: 0 Vector__XXX
+        \\ SG_ Loose : 0|16@1+ (1,0) [0|65535] "" Vector__XXX
+        \\ SG_ Loose : 0|16@1+ (1,0) [0|65535] "" Vector__XXX
+        \\BO_ 1 M: 1 ECU
+        \\ SG_ Value : 0|8@1+ (1,0) [0|255] "" ECU
+        \\CM_ BO_ 3221225472 "unused signals";
+        \\CM_ SG_ 3221225472 Loose "ignored";
+        \\VAL_ 3221225472 Loose 1 "x" ;
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 1), doc.messages.items.len);
+    try std.testing.expectEqualStrings("M", doc.messages.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(diagnostic.Severity.warning, diagnostics.items[0].severity);
+    try std.testing.expectEqual(diagnostic.Code.dbc_independent_signals_skipped, diagnostics.items[0].code);
 }
 
 test "VFrameFormat imports and exports CAN FD frames with CRLF lines" {
