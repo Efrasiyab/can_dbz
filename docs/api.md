@@ -75,7 +75,7 @@ pub fn parseWithOptions(allocator, bytes, diagnostics, options: ParseOptions) Er
 pub fn write(allocator, doc: *const model.Document) Error![]u8   // caller frees
 ```
 
-`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported single-line statements are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` returns `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
+`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported statements, including multi-line ones, are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` returns `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
 
 ### Diagnostics
 

@@ -52,11 +52,12 @@ test "CAN JSON examples export according to the DBC support profile" {
     defer name_diagnostics.deinit(std.testing.allocator);
     const metadata_dbc = try can_dbz.formats.dbc.writeWithDiagnostics(std.testing.allocator, &minimal, &name_diagnostics);
     defer std.testing.allocator.free(metadata_dbc);
-    try std.testing.expectEqual(@as(usize, 2), name_diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 1), name_diagnostics.items.len);
     try std.testing.expectEqual(can_dbz.diagnostic.Severity.warning, name_diagnostics.items[0].severity);
     try std.testing.expectEqualStrings("document name is omitted from DBC export", name_diagnostics.items[0].message);
-    try std.testing.expectEqual(can_dbz.diagnostic.Severity.warning, name_diagnostics.items[1].severity);
-    try std.testing.expectEqualStrings("document description is omitted from DBC export", name_diagnostics.items[1].message);
+    var with_description = try can_dbz.formats.dbc.parse(std.testing.allocator, metadata_dbc, &parse_diagnostics);
+    defer with_description.deinit();
+    try std.testing.expectEqualStrings("CAN JSON export test", with_description.description.?);
 
     var golden = try can_dbz.formats.can_json.parse(std.testing.allocator, @embedFile("fixtures/golden.can.json"));
     defer golden.deinit();

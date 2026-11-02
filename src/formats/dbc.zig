@@ -250,10 +250,16 @@ fn parseLine(
         doc.dbc = .{ .object = metadata };
         return;
     }
+    if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and tokens[1].kind == .string)
+        return parseGlobalComment(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "SG_"))
         return parseSignalComment(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "BU_"))
         return parseNodeComment(doc, tokens, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "BO_"))
+        return parseMessageComment(doc, tokens, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "VAL_TABLE_"))
+        return parseValueTable(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SG_MUL_VAL_"))
         return parseSignalMultiplexerValues(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SIG_VALTYPE_"))
@@ -439,6 +445,19 @@ fn parseSignalComment(
     return lineError(allocator, diagnostics, tokens[2], "signal comment references an unknown message");
 }
 
+fn parseGlobalComment(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len != 3 or !std.mem.eql(u8, tokens[2].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed global comment");
+    if (doc.description != null) return lineError(allocator, diagnostics, tokens[0], "duplicate global comment");
+    doc.description = decodeDbcString(doc.allocator(), tokens[1].text) catch
+        return lineError(allocator, diagnostics, tokens[1], "invalid DBC string escape");
+}
+
 fn parseNodeComment(
     doc: *model.Document,
     tokens: []const Token,
@@ -455,6 +474,52 @@ fn parseNodeComment(
         return;
     }
     return lineError(allocator, diagnostics, tokens[2], "node comment references an unknown node");
+}
+
+fn parseMessageComment(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len != 5 or tokens[2].kind != .word or tokens[3].kind != .string or !std.mem.eql(u8, tokens[4].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed message comment");
+    const raw_id = std.fmt.parseInt(u32, tokens[2].text, 10) catch
+        return lineError(allocator, diagnostics, tokens[2], "invalid message comment identifier");
+    const extended = raw_id & 0x80000000 != 0;
+    const id = raw_id & 0x1fffffff;
+    for (doc.messages.items) |*message| {
+        const message_id = std.fmt.parseInt(u32, message.id[2..], 16) catch continue;
+        if (message_id != id or message.extended != extended) continue;
+        if (message.description != null) return lineError(allocator, diagnostics, tokens[0], "duplicate message comment");
+        message.description = decodeDbcString(doc.allocator(), tokens[3].text) catch
+            return lineError(allocator, diagnostics, tokens[3], "invalid DBC string escape");
+        return;
+    }
+    return lineError(allocator, diagnostics, tokens[2], "message comment references an unknown message");
+}
+
+fn parseValueTable(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len < 3 or tokens[1].kind != .word or !std.mem.eql(u8, tokens[tokens.len - 1].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed value table");
+    const arena = doc.allocator();
+    var table = model.ValueTable{ .name = try arena.dupe(u8, tokens[1].text) };
+    var index: usize = 2;
+    while (index < tokens.len - 1) {
+        const raw = try readDecimal(tokens, &index, arena, allocator, diagnostics);
+        if (index >= tokens.len - 1 or tokens[index].kind != .string)
+            return lineError(allocator, diagnostics, tokens[index - 1], "value table entry requires a quoted label");
+        const label = decodeDbcString(arena, tokens[index].text) catch
+            return lineError(allocator, diagnostics, tokens[index], "invalid DBC string escape");
+        index += 1;
+        try table.choices.append(arena, .{ .raw = raw, .label = label });
+    }
+    try doc.value_tables.append(arena, table);
 }
 
 fn parseSignalValues(
@@ -860,10 +925,17 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     const bus_name: ?[]const u8 = if (doc.buses.items.len > 0) doc.buses.items[0].name else null;
     const bus_ctx: diagnostic.Context = .{ .bus = bus_name };
     if (doc.buses.items.len > 1) try blocker(allocator, diagnostics, "more than one bus cannot be exported", .{});
-    if (doc.value_tables.items.len > 0) try warn(allocator, diagnostics, "document value tables are expanded into DBC signal values", .{});
     if (doc.attributes.items.len > 0) try blocker(allocator, diagnostics, "document-level attribute assignments cannot be exported", .{});
+    for (doc.value_tables.items) |table| {
+        if (!isIdentifier(table.name)) try blocker(allocator, diagnostics, "value table name is not a valid DBC identifier", .{});
+        for (table.choices.items) |choice| {
+            if (!validDbcString(choice.label)) try blocker(allocator, diagnostics, "value table label contains unsupported control characters", .{});
+        }
+    }
     if (doc.name != null) try warn(allocator, diagnostics, "document name is omitted from DBC export", .{});
-    if (doc.description != null) try warn(allocator, diagnostics, "document description is omitted from DBC export", .{});
+    if (doc.description) |description| {
+        if (!validDbcString(description)) try blocker(allocator, diagnostics, "document description contains unsupported control characters", .{});
+    }
     if (doc.extensions != null) try warn(allocator, diagnostics, "document extensions are omitted from DBC export", .{});
     if (doc.dbc) |metadata| {
         if (metadata != .object) {
@@ -919,7 +991,9 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     for (doc.messages.items) |message| {
         const mctx: diagnostic.Context = .{ .bus = bus_name, .message = message.name };
         if (message.receivers.items.len > 0) try blocker(allocator, diagnostics, "message receivers cannot be exported", mctx);
-        if (message.description != null) try blocker(allocator, diagnostics, "message description cannot be exported", mctx);
+        if (message.description) |description| {
+            if (!validDbcString(description)) try blocker(allocator, diagnostics, "message description contains unsupported control characters", mctx);
+        }
         if (message.dbc != null or message.extensions != null) try blocker(allocator, diagnostics, "message dbc metadata and extensions cannot be exported", mctx);
         if (message.transmitters.items.len > 1) try blocker(allocator, diagnostics, "more than one transmitter cannot be exported", mctx);
         if (!isIdentifier(message.name)) try blocker(allocator, diagnostics, "message name is not a valid DBC identifier", mctx);
@@ -974,6 +1048,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     var has_value_tables = false;
     for (doc.messages.items) |message| {
         if (message.frame == .fd) has_fd_frames = true;
+        if (message.description != null) has_comments = true;
         if (message.attributes.items.len > 0) has_message_attributes = true;
         for (message.signals.items) |signal| {
             if (signal.description != null) has_comments = true;
@@ -985,14 +1060,24 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     for (doc.nodes.items) |node| {
         if (node.description != null) has_comments = true;
     }
+    if (doc.description != null) has_comments = true;
     if (has_comments) try appendText(allocator, &output, "\n  CM_");
     if (has_fd_frames or has_message_attributes) try appendText(allocator, &output, "\n  BA_DEF_\n  BA_");
     if (has_mux_values) try appendText(allocator, &output, "\n  SG_MUL_VAL_");
     if (has_float_signals) try appendText(allocator, &output, "\n  SIG_VALTYPE_");
     if (has_value_tables) try appendText(allocator, &output, "\n  VAL_");
+    if (doc.value_tables.items.len > 0) try appendText(allocator, &output, "\n  VAL_TABLE_");
     try appendText(allocator, &output, "\n\nBS_:\n\nBU_:");
     for (doc.nodes.items) |node| try appendFmt(allocator, &output, " {s}", .{node.name});
     try appendText(allocator, &output, "\n\n");
+    for (doc.value_tables.items) |table| {
+        try appendFmt(allocator, &output, "VAL_TABLE_ {s}", .{table.name});
+        for (table.choices.items) |choice| {
+            try appendFmt(allocator, &output, " {s} ", .{choice.raw});
+            try appendDbcString(allocator, &output, choice.label);
+        }
+        try appendText(allocator, &output, " ;\n");
+    }
     for (doc.messages.items) |message| {
         const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
         const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
@@ -1036,9 +1121,19 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             }
         }
     }
+    if (doc.description) |description| {
+        try appendText(allocator, &output, "CM_ ");
+        try appendDbcString(allocator, &output, description);
+        try appendText(allocator, &output, ";\n");
+    }
     for (doc.messages.items) |message| {
         const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
         const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
+        if (message.description) |description| {
+            try appendFmt(allocator, &output, "CM_ BO_ {d} ", .{raw_id});
+            try appendDbcString(allocator, &output, description);
+            try appendText(allocator, &output, ";\n");
+        }
         for (message.signals.items) |signal| {
             if (signal.description) |description| {
                 try appendFmt(allocator, &output, "CM_ SG_ {d} {s} ", .{ raw_id, signal.name });
@@ -1392,6 +1487,60 @@ test "multiple signal receivers are comma separated" {
     try std.testing.expectEqual(@as(usize, 2), reparsed.messages.items[0].signals.items[0].receivers.items.len);
 }
 
+test "message comments and value tables import and export" {
+    const source =
+        \\BU_: ECU
+        \\VAL_TABLE_ OnOff_e 1 "On; on, true" 0 "Off;off" ;
+        \\VAL_TABLE_ Empty_e ;
+        \\BO_ 291 Engine: 1 ECU
+        \\ SG_ Value : 0|8@1+ (1,0) [0|255] "" ECU
+        \\CM_ BO_ 291 "periodic message
+        \\period: 100ms";
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("periodic message\nperiod: 100ms", doc.messages.items[0].description.?);
+    try std.testing.expectEqual(@as(usize, 2), doc.value_tables.items.len);
+    try std.testing.expectEqualStrings("OnOff_e", doc.value_tables.items[0].name);
+    try std.testing.expectEqualStrings("On; on, true", doc.value_tables.items[0].choices.items[0].label);
+    try std.testing.expectEqual(@as(usize, 0), doc.value_tables.items[1].choices.items.len);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    const tables = std.mem.indexOf(u8, output, "\nVAL_TABLE_ OnOff_e").?;
+    try std.testing.expect(tables < std.mem.indexOf(u8, output, "\nBO_ 291").?);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("periodic message\nperiod: 100ms", reparsed.messages.items[0].description.?);
+    try std.testing.expectEqual(@as(usize, 2), reparsed.value_tables.items.len);
+    try std.testing.expectEqualStrings("Off;off", reparsed.value_tables.items[0].choices.items[1].label);
+}
+
+test "global comment imports and exports as the document description" {
+    const source = "BO_ 1 M: 1 ECU\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\nCM_ \"ride60 CAN matrix\";\n";
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("ride60 CAN matrix", doc.description.?);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("ride60 CAN matrix", reparsed.description.?);
+}
+
+test "duplicate message comments are rejected" {
+    const source = "BO_ 1 M: 1 ECU\nCM_ BO_ 1 \"a\";\nCM_ BO_ 1 \"b\";\n";
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 3), diagnostics.items[0].source.dbc.line);
+}
+
 test "exponent notation numbers stay one token and round-trip" {
     const source =
         \\BO_ 1 M: 8 ECU
@@ -1411,7 +1560,7 @@ test "exponent notation numbers stay one token and round-trip" {
 }
 
 test "multi-line comments stay one statement and are preserved verbatim" {
-    const source = "BO_ 1 M: 1 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nCM_ BO_ 1 \"first line\r\nperiod: 100ms\";\r\nFOO_ after;\r\n";
+    const source = "BO_ 1 M: 1 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nCM_ EV_ Env \"first line\r\nperiod: 100ms\";\r\nFOO_ after;\r\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
     defer diagnostics.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
@@ -1421,7 +1570,7 @@ test "multi-line comments stay one statement and are preserved verbatim" {
     defer doc.deinit();
     const statements = doc.dbc.?.object.get("opaque_statements").?.array;
     try std.testing.expectEqual(@as(usize, 2), statements.items.len);
-    try std.testing.expectEqualStrings("CM_ BO_ 1 \"first line\r\nperiod: 100ms\";", statements.items[0].object.get("raw").?.string);
+    try std.testing.expectEqualStrings("CM_ EV_ Env \"first line\r\nperiod: 100ms\";", statements.items[0].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 3), statements.items[0].object.get("line").?.integer);
     try std.testing.expectEqualStrings("FOO_ after;", statements.items[1].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 5), statements.items[1].object.get("line").?.integer);
@@ -1491,7 +1640,7 @@ test "VFrameFormat imports and exports CAN FD frames with CRLF lines" {
 }
 
 test "unimplemented DBC statements are rejected with source locations" {
-    const source = "BO_ 1 M: 1 ECU\nCM_ BO_ 1 \"comment\";\n";
+    const source = "BO_ 1 M: 1 ECU\nCM_ EV_ Env \"comment\";\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
     defer diagnostics.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
@@ -1504,7 +1653,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
         \\VERSION "1"
         \\BO_ 1 M: 1 ECU
         \\ SG_ Value : 0|8@1+ (1,0) [0|255] "" ECU
-        \\CM_ BO_ 1 "comment";
+        \\CM_ EV_ Env "comment";
         \\FOO_ arbitrary;
     ;
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
@@ -1514,7 +1663,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
 
     const statements = doc.dbc.?.object.get("opaque_statements").?.array;
     try std.testing.expectEqual(@as(usize, 2), statements.items.len);
-    try std.testing.expectEqualStrings("CM_ BO_ 1 \"comment\";", statements.items[0].object.get("raw").?.string);
+    try std.testing.expectEqualStrings("CM_ EV_ Env \"comment\";", statements.items[0].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 4), statements.items[0].object.get("line").?.integer);
     try std.testing.expectEqualStrings("FOO_ arbitrary;", statements.items[1].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 5), statements.items[1].object.get("line").?.integer);
@@ -1527,7 +1676,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
 
     const output = try write(std.testing.allocator, &json_doc);
     defer std.testing.allocator.free(output);
-    try std.testing.expect(std.mem.endsWith(u8, output, "CM_ BO_ 1 \"comment\";\nFOO_ arbitrary;\n"));
+    try std.testing.expect(std.mem.endsWith(u8, output, "CM_ EV_ Env \"comment\";\nFOO_ arbitrary;\n"));
 
     var reparsed = try parseWithOptions(std.testing.allocator, output, &diagnostics, .{ .preserve_unsupported_statements = true });
     defer reparsed.deinit();
