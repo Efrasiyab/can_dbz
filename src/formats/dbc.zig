@@ -1214,6 +1214,10 @@ pub fn writeForBusWithDiagnostics(
     };
     if (!std.mem.eql(u8, bus.name, "can0"))
         try warn(allocator, diagnostics, "selected bus name is not represented in DBC; imported bus defaults to can0", .{ .bus = bus.name });
+    if (hasOpaqueStatements(doc.dbc)) {
+        try blocker(allocator, diagnostics, "opaque DBC statements cannot be safely filtered for one bus", .{ .bus = bus.name });
+        return error.UnsupportedConstruct;
+    }
 
     var selected = model.Document.init(allocator);
     defer selected.deinit();
@@ -1224,17 +1228,89 @@ pub fn writeForBusWithDiagnostics(
     selected.description = doc.description;
     try selected.attributes.appendSlice(a, doc.attributes.items);
     try selected.value_tables.appendSlice(a, doc.value_tables.items);
-    try selected.attribute_definitions.appendSlice(a, doc.attribute_definitions.items);
     try selected.environment_variables.appendSlice(a, doc.environment_variables.items);
-    try selected.nodes.appendSlice(a, doc.nodes.items);
     selected.dbc = doc.dbc;
     selected.extensions = doc.extensions;
-    selected.buses.append(a, .{ .name = "can0" }) catch return error.OutOfMemory;
+    var selected_bus = bus.*;
+    selected_bus.name = "can0";
+    try selected.buses.append(a, selected_bus);
     for (doc.messages.items) |message| {
-        if (std.mem.eql(u8, message.bus, bus_name)) try selected.messages.append(a, message);
+        if (!std.mem.eql(u8, message.bus, bus_name)) continue;
+        var selected_message = message;
+        selected_message.bus = "can0";
+        try selected.messages.append(a, selected_message);
+    }
+    for (doc.nodes.items) |node| {
+        if (nodeReferencedBySelectedEntities(node.name, &selected)) try selected.nodes.append(a, node);
+    }
+    for (doc.attribute_definitions.items) |definition| {
+        if (attributeUsedByDocument(&selected, definition.name))
+            try selected.attribute_definitions.append(a, definition);
     }
     return writeWithDiagnostics(allocator, &selected, diagnostics);
 }
+
+fn nodeReferencedBySelectedEntities(node_name: []const u8, doc: *const model.Document) bool {
+    for (doc.environment_variables.items) |variable| {
+        for (variable.access_nodes.items) |access_node| {
+            if (std.mem.eql(u8, access_node, node_name)) return true;
+        }
+    }
+    for (doc.messages.items) |message| {
+        for (message.transmitters.items) |transmitter| {
+            if (std.mem.eql(u8, transmitter, node_name)) return true;
+        }
+        for (message.receivers.items) |receiver| {
+            if (std.mem.eql(u8, receiver, node_name)) return true;
+        }
+        for (message.signals.items) |signal| {
+            for (signal.receivers.items) |receiver| {
+                if (std.mem.eql(u8, receiver, node_name)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn attributeUsedByDocument(doc: *const model.Document, name: []const u8) bool {
+    for (doc.attributes.items) |assignment| {
+        if (std.mem.eql(u8, assignment.name, name)) return true;
+    }
+    for (doc.buses.items) |bus| {
+        for (bus.attributes.items) |assignment| {
+            if (std.mem.eql(u8, assignment.name, name)) return true;
+        }
+    }
+    for (doc.nodes.items) |node| {
+        for (node.attributes.items) |assignment| {
+            if (std.mem.eql(u8, assignment.name, name)) return true;
+        }
+    }
+    for (doc.environment_variables.items) |variable| {
+        for (variable.attributes.items) |assignment| {
+            if (std.mem.eql(u8, assignment.name, name)) return true;
+        }
+    }
+    for (doc.messages.items) |message| {
+        for (message.attributes.items) |assignment| {
+            if (std.mem.eql(u8, assignment.name, name)) return true;
+        }
+        for (message.signals.items) |signal| {
+            for (signal.attributes.items) |assignment| {
+                if (std.mem.eql(u8, assignment.name, name)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn hasOpaqueStatements(metadata: ?std.json.Value) bool {
+    const object = metadata orelse return false;
+    if (object != .object) return false;
+    const statements = object.object.get("opaque_statements") orelse return false;
+    return statements == .array and statements.array.items.len > 0;
+}
+
 fn findBusByName(doc: *const model.Document, name: []const u8) ?*const model.Bus {
     for (doc.buses.items) |*bus| {
         if (std.mem.eql(u8, bus.name, name)) return bus;
@@ -2190,6 +2266,27 @@ test "selected-bus DBC export filters messages and warns about unrepresentable n
     try doc.buses.append(a, .{ .name = "can1" });
     try doc.nodes.append(a, .{ .name = "ECU0" });
     try doc.nodes.append(a, .{ .name = "ECU1" });
+    try doc.nodes.append(a, .{ .name = "Receiver1" });
+    try doc.nodes.append(a, .{ .name = "SharedService" });
+    try doc.attribute_definitions.append(a, .{ .name = "NodeMode", .scope = .node, .value_type = .string });
+    try doc.attribute_definitions.append(a, .{ .name = "UnusedNodeMode", .scope = .node, .value_type = .string });
+    try doc.nodes.items[0].attributes.append(a, .{ .name = "NodeMode", .value = .{ .string = "unselected" } });
+    try doc.nodes.items[1].attributes.append(a, .{ .name = "NodeMode", .value = .{ .string = "selected" } });
+    var global_table = model.ValueTable{ .name = "GlobalModes" };
+    try global_table.choices.append(a, .{ .raw = "0", .label = "Off" });
+    try doc.value_tables.append(a, global_table);
+    var global_variable = model.EnvironmentVariable{
+        .name = "ServiceState",
+        .variable_type = .integer,
+        .minimum = "0",
+        .maximum = "1",
+        .unit = "",
+        .initial_value = "0",
+        .ev_id = 0,
+        .access_type = 0,
+    };
+    try global_variable.access_nodes.append(a, "SharedService");
+    try doc.environment_variables.append(a, global_variable);
     var first = model.Message{
         .name = "First",
         .bus = "can0",
@@ -2208,6 +2305,17 @@ test "selected-bus DBC export filters messages and warns about unrepresentable n
         .length = 1,
     };
     try second.transmitters.append(a, "ECU1");
+    var signal = model.Signal{
+        .name = "Mode",
+        .start_bit = 0,
+        .bit_length = 8,
+        .byte_order = .little_endian,
+        .signal_type = .unsigned,
+        .minimum = "0",
+        .maximum = "255",
+    };
+    try signal.receivers.append(a, "Receiver1");
+    try second.signals.append(a, signal);
     try doc.messages.append(a, first);
     try doc.messages.append(a, second);
 
@@ -2220,12 +2328,22 @@ test "selected-bus DBC export filters messages and warns about unrepresentable n
     try std.testing.expectEqualStrings("can1", diagnostics.items[0].context.bus.?);
     try std.testing.expect(std.mem.indexOf(u8, output, "BO_ 1 Second: 1 ECU1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "First") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BU_: ECU1 Receiver1 SharedService\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "ECU0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "VAL_TABLE_ GlobalModes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BA_DEF_ BU_ \"NodeMode\" STRING;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BA_ \"NodeMode\" BU_ ECU1 \"selected\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "UnusedNodeMode") == null);
 
     var reparsed = try parse(std.testing.allocator, output, &diagnostics);
     defer reparsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), reparsed.messages.items.len);
     try std.testing.expectEqualStrings("Second", reparsed.messages.items[0].name);
     try std.testing.expectEqualStrings("can0", reparsed.messages.items[0].bus);
+    try std.testing.expectEqual(@as(usize, 3), reparsed.nodes.items.len);
+    try std.testing.expectEqualStrings("selected", reparsed.nodes.items[0].attributes.items[0].value.string);
+    try std.testing.expectEqual(@as(usize, 1), reparsed.value_tables.items.len);
+    try std.testing.expectEqual(@as(usize, 1), reparsed.environment_variables.items.len);
 }
 
 test "selected-bus DBC export reports an unknown bus" {
@@ -2237,6 +2355,33 @@ test "selected-bus DBC export reports an unknown bus" {
     try std.testing.expectError(error.UnknownBus, writeForBusWithDiagnostics(std.testing.allocator, &doc, "can1", &diagnostics));
     try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try std.testing.expectEqual(diagnostic.Code.unknown_bus, diagnostics.items[0].code);
+}
+
+test "selected-bus DBC export preserves selected bus blockers" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    const a = doc.allocator();
+    try doc.buses.append(a, .{ .name = "can0" });
+    try doc.buses.append(a, .{ .name = "can1", .nominal_bitrate = 500000 });
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.UnsupportedConstruct, writeForBusWithDiagnostics(std.testing.allocator, &doc, "can1", &diagnostics));
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.items.len);
+    try std.testing.expectEqualStrings("selected bus name is not represented in DBC; imported bus defaults to can0", diagnostics.items[0].message);
+    try std.testing.expectEqualStrings("bus bitrate fields cannot be represented by the supported DBC BS_ profile", diagnostics.items[1].message);
+}
+
+test "selected-bus DBC export rejects unfilterable opaque statements" {
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parseWithOptions(std.testing.allocator, "BO_ 1 M: 1 ECU\nFOO_ opaque;\n", &diagnostics, .{ .preserve_unsupported_statements = true });
+    defer doc.deinit();
+    try doc.buses.append(doc.allocator(), .{ .name = "can1" });
+    doc.messages.items[0].bus = "can1";
+    diagnostics.clearRetainingCapacity();
+    try std.testing.expectError(error.UnsupportedConstruct, writeForBusWithDiagnostics(std.testing.allocator, &doc, "can1", &diagnostics));
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.items.len);
+    try std.testing.expectEqualStrings("opaque DBC statements cannot be safely filtered for one bus", diagnostics.items[1].message);
 }
 
 test "DBC export rejects punctuation in identifiers" {

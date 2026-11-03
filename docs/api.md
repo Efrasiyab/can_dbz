@@ -5,7 +5,7 @@
 Add the package as described in the README, then `const can_dbz = @import("can_dbz");`. The root module exposes:
 
 | Namespace | Purpose |
-|---|---|
+| --- | --- |
 | `can_dbz.model` | `Document` and its entities (`Bus`, `Node`, `EnvironmentVariable`, `Message`, `Signal`, value tables, attributes). |
 | `can_dbz.diagnostic` | `Diagnostic`, `Code`, `Severity`, source references. |
 | `can_dbz.validate` | Semantic validation of a `Document`. |
@@ -77,7 +77,7 @@ pub fn writeForBus(allocator, doc: *const model.Document, bus_name: []const u8) 
 pub fn writeForBusWithDiagnostics(allocator, doc: *const model.Document, bus_name: []const u8, diagnostics) Error![]u8
 ```
 
-`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct, UnknownBus }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported statements, including multi-line ones, are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` retains its single-bus behavior; `writeForBus` exports only messages assigned to the named bus, and `writeForBusWithDiagnostics` also reports that a non-`can0` bus name cannot be represented in DBC. Exporting a multi-bus document to separate DBC files means calling the selected-bus API once per bus. One DBC file cannot retain multiple bus identities. Writers return `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
+`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct, UnknownBus }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported statements, including multi-line ones, are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` retains its single-bus behavior; `writeForBus` filters messages and their referenced nodes to the named bus. It retains document-global value tables and environment variables, including their access nodes. `writeForBusWithDiagnostics` reports that a non-`can0` bus name cannot be represented in DBC. Opaque DBC statements are rejected for selected-bus export because their bus scope cannot be established. Exporting a multi-bus document to separate DBC files means calling the selected-bus API once per bus. One DBC file cannot retain multiple bus identities. Writers return `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
 
 ### Diagnostics
 
@@ -96,7 +96,7 @@ pub fn compile(doc: *const model.Document, allocator: std.mem.Allocator) compile
 `CompiledDatabase` methods (`handle` is a `MessageHandle`, `signal_index` is the signal's position in its message):
 
 | Method | Description |
-|---|---|
+| --- | --- |
 | `findMessage(bus, id, extended) ?MessageHandle` | Frame lookup by bus, numeric ID and extended flag. |
 | `findMessageByName(temp_allocator, bus, name) !?MessageHandle` | Lookup by name (may allocate temporarily). |
 | `findSignal(handle, name) !?usize` | Signal index by name. |

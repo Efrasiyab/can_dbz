@@ -82,8 +82,8 @@ Top-level fields (not all required in v1 files, but reserved by the core schema)
 - `description` (optional): string
 - `buses` (recommended): array of bus objects
 - `nodes` (optional): array of node objects
-  - `environment_variables` (optional): array of environment-variable objects
-  - `attributes` (optional): object of document-scoped attribute name/value pairs
+- `environment_variables` (optional): array of environment-variable objects
+- `attributes` (optional): object of document-scoped attribute name/value pairs
 - `messages` (required): array of message objects
 - `attribute_definitions` (optional): array of attribute definition objects
 - `value_tables` (optional): array of named value table objects
@@ -311,7 +311,7 @@ Canonical serialization preserves **meaning**, not original whitespace or number
 
 ---
 
-# Extensive Examples
+## Extensive Examples
 
 These examples are intended to be copy/paste-able and to cover the tricky parts: endianness, muxing, FD payloads, attributes, and value tables.
 
