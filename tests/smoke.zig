@@ -65,13 +65,152 @@ test "CAN JSON examples export according to the DBC support profile" {
     defer diagnostics.deinit(std.testing.allocator);
     const golden_dbc = try can_dbz.formats.dbc.writeWithDiagnostics(std.testing.allocator, &golden, &diagnostics);
     defer std.testing.allocator.free(golden_dbc);
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 6), diagnostics.items.len);
+    try std.testing.expectEqualStrings("document name is omitted from DBC export", diagnostics.items[0].message);
+    for (diagnostics.items[1..]) |item| {
+        try std.testing.expectEqualStrings("missing signal bounds are written as [0|0]", item.message);
+    }
     try std.testing.expectEqual(can_dbz.diagnostic.Severity.warning, diagnostics.items[0].severity);
     var golden_exported = try can_dbz.formats.dbc.parse(std.testing.allocator, golden_dbc, &parse_diagnostics);
     defer golden_exported.deinit();
     try std.testing.expectEqual(can_dbz.model.FrameKind.fd, golden_exported.messages.items[0].frame);
     try std.testing.expectEqual(@as(u16, 64), golden_exported.messages.items[0].length);
     try std.testing.expect(golden_exported.messages.items[0].extended);
+}
+
+test "DBC standard-gap fixture round-trips modeled environment variables" {
+    const source = @embedFile("fixtures/dbc-standard-gaps.dbc");
+    var diagnostics: std.ArrayListUnmanaged(can_dbz.diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidDbc, can_dbz.formats.dbc.parse(std.testing.allocator, source, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 3), diagnostics.items[0].source.dbc.line);
+
+    var doc = try can_dbz.formats.dbc.parseWithOptions(std.testing.allocator, source, &diagnostics, .{ .preserve_unsupported_statements = true });
+    defer doc.deinit();
+    const expected = [_][]const u8{"BS_: 500000 : 1"};
+    const statements = doc.dbc.?.object.get("opaque_statements").?.array.items;
+    try std.testing.expectEqual(expected.len, statements.len);
+    for (expected, statements) |expected_raw, statement| {
+        try std.testing.expectEqualStrings(expected_raw, statement.object.get("raw").?.string);
+    }
+    try std.testing.expectEqual(@as(usize, 1), doc.messages.items.len);
+    try std.testing.expectEqualStrings("DASH", doc.messages.items[0].signals.items[0].receivers.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), doc.messages.items[0].transmitters.items.len);
+    try std.testing.expectEqualStrings("DASH", doc.messages.items[0].transmitters.items[1]);
+    try std.testing.expectEqual(@as(usize, 7), doc.attribute_definitions.items.len);
+    try std.testing.expectEqualStrings("controller", doc.attribute_definitions.items[0].default.?.string);
+    try std.testing.expectEqualStrings("unnamed", doc.attribute_definitions.items[1].default.?.string);
+    try std.testing.expectEqualStrings("0", doc.attribute_definitions.items[2].default.?.integer);
+    try std.testing.expectEqualStrings("1.0", doc.attribute_definitions.items[3].default.?.float);
+    try std.testing.expectEqualStrings("0x00", doc.attribute_definitions.items[4].default.?.hex);
+    try std.testing.expectEqual(@as(u32, 0), doc.attribute_definitions.items[5].default.?.enum_index);
+    try std.testing.expectEqual(@as(u32, 0), doc.attribute_definitions.items[6].default.?.enum_index);
+    try std.testing.expectEqualStrings("fleet-a", doc.attributes.items[0].value.string);
+    try std.testing.expectEqualStrings("controller", doc.nodes.items[0].attributes.items[0].value.string);
+    try std.testing.expectEqual(@as(usize, 2), doc.messages.items[0].attributes.items.len);
+    try std.testing.expectEqualStrings("100", doc.messages.items[0].attributes.items[0].value.integer);
+    try std.testing.expectEqual(@as(u32, 1), doc.messages.items[0].attributes.items[1].value.enum_index);
+    try std.testing.expectEqual(@as(usize, 2), doc.messages.items[0].signals.items[0].attributes.items.len);
+    try std.testing.expectEqualStrings("0.75", doc.messages.items[0].signals.items[0].attributes.items[0].value.float);
+    try std.testing.expectEqualStrings("0xA5", doc.messages.items[0].signals.items[0].attributes.items[1].value.hex);
+    try std.testing.expectEqual(@as(usize, 4), doc.environment_variables.items.len);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.integer, doc.environment_variables.items[0].variable_type);
+    try std.testing.expectEqual(@as(u32, 1), doc.environment_variables.items[0].ev_id);
+    try std.testing.expectEqualStrings("ambient temperature", doc.environment_variables.items[0].description.?);
+    try std.testing.expectEqual(@as(u32, 1), doc.environment_variables.items[0].attributes.items[0].value.enum_index);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.data, doc.environment_variables.items[1].variable_type);
+    try std.testing.expectEqual(@as(?u32, 16), doc.environment_variables.items[1].data_size);
+    try std.testing.expectEqualStrings("raw payload", doc.environment_variables.items[1].description.?);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.float, doc.environment_variables.items[2].variable_type);
+    try std.testing.expectEqualStrings("20.0", doc.environment_variables.items[2].initial_value);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.string, doc.environment_variables.items[3].variable_type);
+    try std.testing.expectEqualStrings("normal", doc.environment_variables.items[3].initial_value);
+
+    const json = try can_dbz.formats.can_json.write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(json);
+    var json_reparsed = try can_dbz.formats.can_json.parse(std.testing.allocator, json);
+    defer json_reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 4), json_reparsed.environment_variables.items.len);
+    try std.testing.expectEqual(@as(?u32, 16), json_reparsed.environment_variables.items[1].data_size);
+
+    const output = try can_dbz.formats.dbc.write(std.testing.allocator, &json_reparsed);
+    defer std.testing.allocator.free(output);
+    var reparsed = try can_dbz.formats.dbc.parseWithOptions(std.testing.allocator, output, &diagnostics, .{ .preserve_unsupported_statements = true });
+    defer reparsed.deinit();
+    const reparsed_statements = reparsed.dbc.?.object.get("opaque_statements").?.array.items;
+    try std.testing.expectEqual(expected.len, reparsed_statements.len);
+    for (expected, reparsed_statements) |expected_raw, statement| {
+        try std.testing.expectEqualStrings(expected_raw, statement.object.get("raw").?.string);
+    }
+    try std.testing.expectEqual(@as(usize, 2), reparsed.messages.items[0].transmitters.items.len);
+    try std.testing.expectEqualStrings("DASH", reparsed.messages.items[0].transmitters.items[1]);
+    try std.testing.expectEqual(@as(usize, 7), reparsed.attribute_definitions.items.len);
+    try std.testing.expectEqualStrings("controller", reparsed.attribute_definitions.items[0].default.?.string);
+    try std.testing.expectEqualStrings("unnamed", reparsed.attribute_definitions.items[1].default.?.string);
+    try std.testing.expectEqualStrings("0", reparsed.attribute_definitions.items[2].default.?.integer);
+    try std.testing.expectEqualStrings("1.0", reparsed.attribute_definitions.items[3].default.?.float);
+    try std.testing.expectEqualStrings("0x00", reparsed.attribute_definitions.items[4].default.?.hex);
+    try std.testing.expectEqual(@as(u32, 0), reparsed.attribute_definitions.items[5].default.?.enum_index);
+    try std.testing.expectEqual(@as(u32, 0), reparsed.attribute_definitions.items[6].default.?.enum_index);
+    try std.testing.expectEqualStrings("fleet-a", reparsed.attributes.items[0].value.string);
+    try std.testing.expectEqualStrings("controller", reparsed.nodes.items[0].attributes.items[0].value.string);
+    try std.testing.expectEqualStrings("100", reparsed.messages.items[0].attributes.items[0].value.integer);
+    try std.testing.expectEqual(@as(u32, 1), reparsed.messages.items[0].attributes.items[1].value.enum_index);
+    try std.testing.expectEqualStrings("0.75", reparsed.messages.items[0].signals.items[0].attributes.items[0].value.float);
+    try std.testing.expectEqualStrings("0xA5", reparsed.messages.items[0].signals.items[0].attributes.items[1].value.hex);
+    try std.testing.expectEqual(@as(usize, 4), reparsed.environment_variables.items.len);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.integer, reparsed.environment_variables.items[0].variable_type);
+    try std.testing.expectEqual(@as(u32, 1), reparsed.environment_variables.items[0].ev_id);
+    try std.testing.expectEqualStrings("ambient temperature", reparsed.environment_variables.items[0].description.?);
+    try std.testing.expectEqual(@as(u32, 1), reparsed.environment_variables.items[0].attributes.items[0].value.enum_index);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.data, reparsed.environment_variables.items[1].variable_type);
+    try std.testing.expectEqual(@as(?u32, 16), reparsed.environment_variables.items[1].data_size);
+    try std.testing.expectEqualStrings("raw payload", reparsed.environment_variables.items[1].description.?);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.float, reparsed.environment_variables.items[2].variable_type);
+    try std.testing.expectEqualStrings("20.0", reparsed.environment_variables.items[2].initial_value);
+    try std.testing.expectEqual(can_dbz.model.EnvironmentVariableType.string, reparsed.environment_variables.items[3].variable_type);
+    try std.testing.expectEqualStrings("normal", reparsed.environment_variables.items[3].initial_value);
+}
+
+test "DBC writer emits the cantools interoperability golden fixture" {
+    var doc = can_dbz.model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    const arena = doc.allocator();
+    try doc.buses.append(arena, .{ .name = "can0" });
+    try doc.nodes.append(arena, .{ .name = "ECU" });
+    var message = can_dbz.model.Message{
+        .name = "Status",
+        .bus = "can0",
+        .id = "0x1",
+        .extended = false,
+        .frame = .classic,
+        .length = 1,
+    };
+    try message.transmitters.append(arena, "ECU");
+    try message.signals.append(arena, .{
+        .name = "Value",
+        .start_bit = 0,
+        .bit_length = 8,
+        .byte_order = .little_endian,
+        .signal_type = .unsigned,
+        .minimum = "0",
+        .maximum = "255",
+        .receivers = .empty,
+    });
+    try message.signals.items[0].receivers.append(arena, "ECU");
+    try doc.messages.append(arena, message);
+
+    const output = try can_dbz.formats.dbc.write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings(@embedFile("fixtures/dbc-cantools-writer.dbc"), output);
+
+    var diagnostics: std.ArrayListUnmanaged(can_dbz.diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var reparsed = try can_dbz.formats.dbc.parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("Status", reparsed.messages.items[0].name);
+    try std.testing.expectEqualStrings("ECU", reparsed.messages.items[0].signals.items[0].receivers.items[0]);
 }
 
 test "node description DBC fixture imports and exports with escaping" {

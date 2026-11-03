@@ -1,0 +1,39 @@
+VERSION "1"
+NS_ :
+BS_: 500000 : 1
+
+BU_: ECU DASH
+BO_ 1 Status: 1 ECU
+ SG_ Value : 0|8@1+ (1,0) [0|255] "" DASH
+BO_TX_BU_ 1 : DASH;
+BA_DEF_ BU_ "NodeRole" STRING;
+BA_DEF_DEF_ "NodeRole" "controller";
+BA_ "NodeRole" BU_ ECU "controller";
+BA_DEF_ "FleetName" STRING;
+BA_DEF_DEF_ "FleetName" "unnamed";
+BA_ "FleetName" "fleet-a";
+BA_DEF_ BO_ "Cycle" INT 0 65535;
+BA_DEF_DEF_ "Cycle" 0;
+BA_ "Cycle" BO_ 1 100;
+BA_DEF_ SG_ "Gain" FLOAT -10.0 10.0;
+BA_DEF_DEF_ "Gain" 1.0;
+BA_ "Gain" SG_ 1 Value 0.75;
+BA_DEF_ SG_ "Mask" HEX 0x0 0xFF;
+BA_DEF_DEF_ "Mask" 0x00;
+BA_ "Mask" SG_ 1 Value 0xA5;
+BA_DEF_ BO_ "Mode" ENUM "normal","diagnostic";
+BA_DEF_DEF_ "Mode" 0;
+BA_ "Mode" BO_ 1 1;
+BA_DEF_ EV_ "EnvMode" ENUM "scalar","data";
+BA_DEF_DEF_ "EnvMode" 0;
+EV_ Ambient: 0 [0|255] "degC" 0 1 0 DUMMY_NODE_VECTOR0;
+EV_ Payload: 3 [0|0] "" 0 2 0 ECU;
+EV_ Temperature: 1 [-40.0|125.0] "degC" 20.0 3 0 ECU;
+EV_ ModeName: 2 [0|0] "" "normal" 4 0 ECU;
+ENVVAR_DATA_ Payload : 16;
+BA_ "EnvMode" EV_ Ambient 1;
+BA_ "EnvMode" EV_ Payload 0;
+CM_ EV_ Ambient "ambient temperature";
+CM_ EV_ Payload "raw payload";
+CM_ EV_ Temperature "measured temperature";
+CM_ EV_ ModeName "operating mode";

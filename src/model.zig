@@ -8,6 +8,7 @@ pub const Document = struct {
     description: ?[]const u8 = null,
     buses: std.ArrayListUnmanaged(Bus) = .empty,
     nodes: std.ArrayListUnmanaged(Node) = .empty,
+    environment_variables: std.ArrayListUnmanaged(EnvironmentVariable) = .empty,
     messages: std.ArrayListUnmanaged(Message) = .empty,
     attributes: std.ArrayListUnmanaged(AttributeAssignment) = .empty,
     value_tables: std.ArrayListUnmanaged(ValueTable) = .empty,
@@ -48,6 +49,30 @@ pub const Node = struct {
     extensions: ?std.json.Value = null,
 };
 
+pub const EnvironmentVariableType = enum {
+    integer,
+    float,
+    string,
+    data,
+};
+
+pub const EnvironmentVariable = struct {
+    name: []const u8,
+    variable_type: EnvironmentVariableType,
+    minimum: []const u8,
+    maximum: []const u8,
+    unit: []const u8,
+    initial_value: []const u8,
+    ev_id: u32,
+    access_type: u32,
+    access_nodes: std.ArrayListUnmanaged([]const u8) = .empty,
+    data_size: ?u32 = null,
+    description: ?[]const u8 = null,
+    attributes: std.ArrayListUnmanaged(AttributeAssignment) = .empty,
+    dbc: ?std.json.Value = null,
+    extensions: ?std.json.Value = null,
+};
+
 pub const FrameKind = enum {
     classic,
     fd,
@@ -71,6 +96,7 @@ pub const AttributeScope = enum {
     node,
     message,
     signal,
+    environment_variable,
 };
 
 pub const AttributeType = enum {

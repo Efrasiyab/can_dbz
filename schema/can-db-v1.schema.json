@@ -43,6 +43,11 @@
         }
       }
     },
+    "environment_variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/environment_variable" }
+    },
+    "attributes": { "$ref": "#/$defs/attributes" },
     "attribute_definitions": {
       "type": "array",
       "items": {
@@ -51,7 +56,7 @@
         "required": ["name", "scope", "type"],
         "properties": {
           "name": { "type": "string" },
-          "scope": { "enum": ["document", "bus", "node", "message", "signal"] },
+          "scope": { "enum": ["document", "bus", "node", "message", "signal", "environment_variable"] },
           "type": { "enum": ["integer", "hex", "float", "string", "enum"] },
           "minimum": { "type": "string" },
           "maximum": { "type": "string" },
@@ -96,6 +101,27 @@
     "attributes": {
       "type": "object",
       "additionalProperties": { "type": "string" }
+    },
+    "environment_variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "minimum", "maximum", "unit", "initial_value", "ev_id", "access_type", "access_nodes"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "enum": ["integer", "float", "string", "data"] },
+        "minimum": { "type": "string" },
+        "maximum": { "type": "string" },
+        "unit": { "type": "string" },
+        "initial_value": { "type": "string" },
+        "ev_id": { "type": "integer", "minimum": 0 },
+        "access_type": { "type": "integer", "minimum": 0 },
+        "access_nodes": { "type": "array", "items": { "type": "string" } },
+        "data_size": { "type": "integer", "minimum": 0 },
+        "description": { "type": "string" },
+        "attributes": { "$ref": "#/$defs/attributes" },
+        "dbc": { "type": "object" },
+        "extensions": { "type": "object" }
+      }
     },
     "choice": {
       "type": "object",

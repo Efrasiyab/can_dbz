@@ -1,0 +1,11 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU
+
+
+BO_ 1 Status: 1 ECU
+ SG_ Value : 0|8@1+ (1,0) [0|255] "" ECU

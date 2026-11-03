@@ -32,7 +32,7 @@ pub fn parseWithDiagnostics(
     };
     if (root != .object) return invalid(diagnostics, allocator, .invalid_field_type, "top-level value must be an object");
     try checkFields(root.object, &.{
-        "format",                "format_version", "name", "description", "buses", "nodes", "messages",
+        "format",                "format_version", "name", "description", "buses", "nodes", "environment_variables", "attributes", "messages",
         "attribute_definitions", "value_tables",   "dbc",  "extensions",
     }, diagnostics, allocator);
     doc.format = try requiredString(root.object, "format", diagnostics, allocator);
@@ -43,9 +43,11 @@ pub fn parseWithDiagnostics(
     doc.extensions = try optionalObject(root.object, "extensions", diagnostics, allocator);
 
     try parseAttributeDefinitions(&doc, root.object, diagnostics, allocator);
+    if (get(root.object, "attributes")) |attrs| try parseAssignments(arena, &doc.attributes, attrs, &doc, diagnostics, allocator);
     try parseValueTables(&doc, root.object, diagnostics, allocator);
     if (get(root.object, "buses")) |buses| try parseBuses(&doc, buses, diagnostics, allocator);
     if (get(root.object, "nodes")) |nodes| try parseNodes(&doc, nodes, diagnostics, allocator);
+    if (get(root.object, "environment_variables")) |environment_variables| try parseEnvironmentVariables(&doc, environment_variables, diagnostics, allocator);
     const messages = get(root.object, "messages") orelse return invalid(diagnostics, allocator, .missing_field, "required field 'messages' is missing");
     try parseMessages(&doc, messages, diagnostics, allocator);
 
@@ -66,8 +68,10 @@ pub fn write(allocator: std.mem.Allocator, doc: *const model.Document) std.mem.A
     try put(&root, a, "format_version", .{ .integer = doc.format_version });
     if (doc.name) |value| try put(&root, a, "name", .{ .string = value });
     if (doc.description) |value| try put(&root, a, "description", .{ .string = value });
+    if (doc.attributes.items.len > 0) try put(&root, a, "attributes", try writeAssignments(a, doc.attributes.items));
     if (doc.buses.items.len > 0) try put(&root, a, "buses", try writeBuses(a, doc.buses.items));
     if (doc.nodes.items.len > 0) try put(&root, a, "nodes", try writeNodes(a, doc.nodes.items));
+    if (doc.environment_variables.items.len > 0) try put(&root, a, "environment_variables", try writeEnvironmentVariables(a, doc.environment_variables.items));
     if (doc.attribute_definitions.items.len > 0) try put(&root, a, "attribute_definitions", try writeAttributeDefinitions(a, doc.attribute_definitions.items));
     if (doc.value_tables.items.len > 0) try put(&root, a, "value_tables", try writeValueTables(a, doc.value_tables.items));
     try put(&root, a, "messages", try writeMessages(a, doc.messages.items));
@@ -111,6 +115,33 @@ fn parseNodes(doc: *model.Document, value: JsonValue, diagnostics: *std.ArrayLis
         node.extensions = try optionalObject(obj, "extensions", diagnostics, allocator);
         if (get(obj, "attributes")) |attrs| try parseAssignments(a, &node.attributes, attrs, doc, diagnostics, allocator);
         try doc.nodes.append(a, node);
+    }
+}
+
+fn parseEnvironmentVariables(doc: *model.Document, value: JsonValue, diagnostics: *std.ArrayListUnmanaged(Diag), allocator: std.mem.Allocator) ParseError!void {
+    if (value != .array) return invalid(diagnostics, allocator, .invalid_field_type, "'environment_variables' must be an array");
+    const a = doc.allocator();
+    for (value.array.items) |entry| {
+        const obj = try requireObject(entry, diagnostics, allocator, "environment variable");
+        try checkFields(obj, &.{ "name", "type", "minimum", "maximum", "unit", "initial_value", "ev_id", "access_type", "access_nodes", "data_size", "description", "attributes", "dbc", "extensions" }, diagnostics, allocator);
+        var variable = model.EnvironmentVariable{
+            .name = try requiredString(obj, "name", diagnostics, allocator),
+            .variable_type = try enumValue(model.EnvironmentVariableType, try requiredString(obj, "type", diagnostics, allocator), diagnostics, allocator),
+            .minimum = try requiredString(obj, "minimum", diagnostics, allocator),
+            .maximum = try requiredString(obj, "maximum", diagnostics, allocator),
+            .unit = try requiredString(obj, "unit", diagnostics, allocator),
+            .initial_value = try requiredString(obj, "initial_value", diagnostics, allocator),
+            .ev_id = try requiredU32(obj, "ev_id", diagnostics, allocator),
+            .access_type = try requiredU32(obj, "access_type", diagnostics, allocator),
+        };
+        variable.data_size = try optionalU32(obj, "data_size", diagnostics, allocator);
+        variable.description = try optionalString(obj, "description", diagnostics, allocator);
+        variable.dbc = try optionalObject(obj, "dbc", diagnostics, allocator);
+        variable.extensions = try optionalObject(obj, "extensions", diagnostics, allocator);
+        const access_nodes = get(obj, "access_nodes") orelse return invalid(diagnostics, allocator, .missing_field, "environment variable requires 'access_nodes'");
+        try parseStringArray(a, &variable.access_nodes, access_nodes, diagnostics, allocator, "access_nodes");
+        if (get(obj, "attributes")) |attrs| try parseAssignments(a, &variable.attributes, attrs, doc, diagnostics, allocator);
+        try doc.environment_variables.append(a, variable);
     }
 }
 
@@ -298,6 +329,29 @@ fn writeNodes(a: std.mem.Allocator, nodes: []const model.Node) std.mem.Allocator
         if (node.attributes.items.len > 0) try put(&obj, a, "attributes", try writeAssignments(a, node.attributes.items));
         if (node.dbc) |v| try put(&obj, a, "dbc", v);
         if (node.extensions) |v| try put(&obj, a, "extensions", v);
+        try array.append(.{ .object = obj });
+    }
+    return .{ .array = array };
+}
+
+fn writeEnvironmentVariables(a: std.mem.Allocator, variables: []const model.EnvironmentVariable) std.mem.Allocator.Error!JsonValue {
+    var array = std.json.Array.init(a);
+    for (variables) |variable| {
+        var obj = try object(a);
+        try put(&obj, a, "name", .{ .string = variable.name });
+        try put(&obj, a, "type", .{ .string = @tagName(variable.variable_type) });
+        try put(&obj, a, "minimum", .{ .string = variable.minimum });
+        try put(&obj, a, "maximum", .{ .string = variable.maximum });
+        try put(&obj, a, "unit", .{ .string = variable.unit });
+        try put(&obj, a, "initial_value", .{ .string = variable.initial_value });
+        try put(&obj, a, "ev_id", .{ .integer = variable.ev_id });
+        try put(&obj, a, "access_type", .{ .integer = variable.access_type });
+        try put(&obj, a, "access_nodes", try stringArray(a, variable.access_nodes.items));
+        if (variable.data_size) |size| try put(&obj, a, "data_size", .{ .integer = size });
+        if (variable.description) |description| try put(&obj, a, "description", .{ .string = description });
+        if (variable.attributes.items.len > 0) try put(&obj, a, "attributes", try writeAssignments(a, variable.attributes.items));
+        if (variable.dbc) |value| try put(&obj, a, "dbc", value);
+        if (variable.extensions) |value| try put(&obj, a, "extensions", value);
         try array.append(.{ .object = obj });
     }
     return .{ .array = array };

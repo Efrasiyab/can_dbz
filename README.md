@@ -8,10 +8,10 @@ A Zig library for converting CAN databases (DBC and an editable JSON format) and
 ## Features (current)
 
 - Semantic `Document` model with validation and structured diagnostics.
-- Strict, versioned **CAN JSON v1** parser and canonical writer ([format](docs/can-json.md), [schema](schema/can-db-v1.schema.json)).
+- Strict, versioned **CAN JSON v1** parser and canonical writer, including multi-bus databases and environment variables ([format](docs/can-json.md), [schema](schema/can-db-v1.schema.json)).
 - Compiled database with message/signal indexes and raw encode/decode (Intel/Motorola, signed/unsigned, 32/64-bit floats, simple multiplexing) using caller-provided buffers.
 - Physical value conversion (scale/offset, bounds, explicit rounding) and choice lookup.
-- Incremental DBC import/export profile ([support matrix](docs/dbc-support.md)); unsupported statements are rejected by default or optionally preserved verbatim.
+- DBC import/export for the documented profile, including typed attributes, environment variables, and selected-bus export for multi-bus documents ([support matrix](docs/dbc-support.md)); unsupported statements are rejected by default or optionally preserved verbatim.
 
 ## Requirements
 
@@ -62,15 +62,14 @@ zig build bench        # load-time vs. decode benchmark (not a performance claim
 
 A [Containerfile](Containerfile) with the pinned Zig toolchain is provided for a reproducible environment.
 
-## Roadmap / planned work
+## Roadmap
 
-Nothing below is implemented or promised; it records the intended direction.
+The DBC support profile is intentionally limited; see its matrix for implemented import/export behavior.
 
-- **Broader DBC coverage:** comment scopes beyond node and signal `CM_`, `VAL_TABLE_`, attribute types/scopes beyond bounded message integers, signal groups, environment variables, and relationship metadata — each with structured storage and writers before being claimed as supported.
+- **Broader DBC coverage:** standard records not yet modeled, including signal groups, remaining comment scopes, and additional relationship metadata.
 - **Long names:** DBC long-name handling that keeps original names.
-- **Safer round trips:** export reports listing anything lossy and refusal of lossy export by default; validation of DBC identifier rules, escaping and encodings; rejecting preserved opaque statements whose validity cannot be established after edits; atomic output file replacement. Semantic equivalence (not byte-identical text) is the intended guarantee for the supported profile; byte-identical regeneration would need a separate concrete-syntax-tree editor and is out of scope.
-- **Multi-bus databases:** DBC export of one selected bus, rejecting ambiguous multi-bus exports.
-- **Verification:** differential tests against other implementations (for example cantools and dbcppp) on a shared supported subset; more exhaustive correctness gates (all start bits and widths in Classic and FD payloads, nine-byte spans, nested multiplexing, unknown selectors, short buffers); expanded bounded-resource fuzzing.
+- **Safer round trips:** expose a complete export-loss report and optionally refuse lossy export; reject opaque statements whose validity cannot be established after edits; atomic output file replacement. Semantic equivalence (not byte-identical text) is the intended guarantee for the supported profile; byte-identical regeneration would need a separate concrete-syntax-tree editor and is out of scope.
+- **Verification:** expand beyond the narrow cantools 40.7.1 writer-fixture check to differential tests on a shared supported subset; add more exhaustive correctness gates (all start bits and widths in Classic and FD payloads, nine-byte spans, nested multiplexing, unknown selectors, short buffers) and bounded-resource fuzzing.
 - **Performance:** reproducible benchmarks on named hardware and build modes (frame lookup, cached-handle decode, raw vs. physical, encode, selected-signal decode, allocation counts) before adding specialized dispatch or code generation. No throughput target is promised until measured.
 - **Releases:** stable API and format versioning, tagged releases.
 

@@ -6,7 +6,7 @@ Add the package as described in the README, then `const can_dbz = @import("can_d
 
 | Namespace | Purpose |
 |---|---|
-| `can_dbz.model` | `Document` and its entities (`Bus`, `Node`, `Message`, `Signal`, value tables, attributes). |
+| `can_dbz.model` | `Document` and its entities (`Bus`, `Node`, `EnvironmentVariable`, `Message`, `Signal`, value tables, attributes). |
 | `can_dbz.diagnostic` | `Diagnostic`, `Code`, `Severity`, source references. |
 | `can_dbz.validate` | Semantic validation of a `Document`. |
 | `can_dbz.formats.can_json` | CAN JSON v1 parser and canonical writer. |
@@ -73,9 +73,11 @@ const dbc = can_dbz.formats.dbc;
 pub fn parse(allocator, bytes, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic)) Error!model.Document
 pub fn parseWithOptions(allocator, bytes, diagnostics, options: ParseOptions) Error!model.Document
 pub fn write(allocator, doc: *const model.Document) Error![]u8   // caller frees
+pub fn writeForBus(allocator, doc: *const model.Document, bus_name: []const u8) Error![]u8
+pub fn writeForBusWithDiagnostics(allocator, doc: *const model.Document, bus_name: []const u8, diagnostics) Error![]u8
 ```
 
-`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported statements, including multi-line ones, are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` returns `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
+`Error` is `error{ OutOfMemory, InvalidDbc, UnsupportedConstruct, UnknownBus }`. `parse` is strict: statements outside the supported profile fail with a diagnostic carrying the source line and column. With `ParseOptions{ .preserve_unsupported_statements = true }`, unsupported statements, including multi-line ones, are stored in `doc.dbc.opaque_statements` (raw text and line number) and re-emitted by `write`. `write` retains its single-bus behavior; `writeForBus` exports only messages assigned to the named bus, and `writeForBusWithDiagnostics` also reports that a non-`can0` bus name cannot be represented in DBC. Exporting a multi-bus document to separate DBC files means calling the selected-bus API once per bus. One DBC file cannot retain multiple bus identities. Writers return `UnsupportedConstruct` for model content the DBC profile cannot express. See [dbc-support.md](./dbc-support.md).
 
 ### Diagnostics
 

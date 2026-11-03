@@ -82,6 +82,8 @@ Top-level fields (not all required in v1 files, but reserved by the core schema)
 - `description` (optional): string
 - `buses` (recommended): array of bus objects
 - `nodes` (optional): array of node objects
+  - `environment_variables` (optional): array of environment-variable objects
+  - `attributes` (optional): object of document-scoped attribute name/value pairs
 - `messages` (required): array of message objects
 - `attribute_definitions` (optional): array of attribute definition objects
 - `value_tables` (optional): array of named value table objects
@@ -100,6 +102,25 @@ Suggested future fields (optional): `nominal_bitrate`, `data_bitrate`, `protocol
 
 ```json
 { "name": "ECU" }
+```
+
+### Environment Variable
+
+Environment variables preserve DBC `EV_` declarations. `type` is `"integer"`, `"float"`, `"string"`, or `"data"`; numeric fields are decimal strings so their spelling and precision are retained. `access_nodes` lists node names, and `data_size` carries the `ENVVAR_DATA_` size for data variables.
+
+```json
+{
+  "name": "Ambient",
+  "type": "integer",
+  "minimum": "0",
+  "maximum": "255",
+  "unit": "degC",
+  "initial_value": "0",
+  "ev_id": 0,
+  "access_type": 0,
+  "access_nodes": ["ECU"],
+  "description": "Ambient temperature"
+}
 ```
 
 ## Message Object

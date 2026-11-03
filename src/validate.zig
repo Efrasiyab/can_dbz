@@ -33,6 +33,39 @@ pub fn validateDocument(
         }
         try validateAssignments(node.attributes.items, .node, doc, null, null, allocator, diagnostics);
     }
+    for (doc.environment_variables.items, 0..) |variable, i| {
+        for (doc.environment_variables.items[0..i]) |earlier| {
+            if (std.mem.eql(u8, variable.name, earlier.name))
+                try report(diagnostics, allocator, .duplicate_environment_variable_name, "environment variable names must be unique", .{});
+        }
+        if (variable.name.len == 0)
+            try report(diagnostics, allocator, .invalid_environment_variable, "environment variable name must not be empty", .{});
+        const minimum = parseFiniteDecimal(variable.minimum);
+        const maximum = parseFiniteDecimal(variable.maximum);
+        if (minimum == null or maximum == null) {
+            try report(diagnostics, allocator, .invalid_environment_variable, "environment variable bounds must be finite decimal strings", .{});
+        } else if (minimum.? > maximum.?) {
+            try report(diagnostics, allocator, .invalid_environment_variable, "environment variable minimum exceeds maximum", .{});
+        }
+        switch (variable.variable_type) {
+            .integer => if (parseDecimal(variable.initial_value) == null)
+                try report(diagnostics, allocator, .invalid_environment_variable, "integer environment variable initial value must be a decimal integer", .{}),
+            .float => if (parseFiniteDecimal(variable.initial_value) == null)
+                try report(diagnostics, allocator, .invalid_environment_variable, "float environment variable initial value must be finite", .{}),
+            .string => {},
+            .data => {
+                if (parseDecimal(variable.initial_value) == null)
+                    try report(diagnostics, allocator, .invalid_environment_variable, "data environment variable initial value must be a decimal integer", .{});
+                if (variable.data_size == null)
+                    try report(diagnostics, allocator, .invalid_environment_variable, "data environment variable requires ENVVAR_DATA_ size", .{});
+            },
+        }
+        for (variable.access_nodes.items) |node_name| {
+            if (!std.mem.eql(u8, node_name, "DUMMY_NODE_VECTOR0") and !std.mem.eql(u8, node_name, "Vector__XXX") and !containsNode(doc, node_name))
+                try report(diagnostics, allocator, .unknown_node, "environment variable references an undefined access node", .{});
+        }
+        try validateAssignments(variable.attributes.items, .environment_variable, doc, null, null, allocator, diagnostics);
+    }
     for (doc.value_tables.items, 0..) |table, i| {
         for (doc.value_tables.items[0..i]) |earlier| {
             if (std.mem.eql(u8, table.name, earlier.name))

@@ -4,7 +4,7 @@ const diagnostic = @import("../diagnostic.zig");
 const validate = @import("../validate.zig");
 const can_json = @import("can_json.zig");
 
-pub const Error = error{ OutOfMemory, InvalidDbc, UnsupportedConstruct };
+pub const Error = error{ OutOfMemory, InvalidDbc, UnsupportedConstruct, UnknownBus };
 pub const ParseOptions = struct {
     preserve_unsupported_statements: bool = false,
 };
@@ -258,6 +258,12 @@ fn parseLine(
         return parseNodeComment(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "BO_"))
         return parseMessageComment(doc, tokens, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "CM_") and tokens.len > 1 and std.mem.eql(u8, tokens[1].text, "EV_"))
+        return parseEnvironmentVariableComment(doc, tokens, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "EV_"))
+        return parseEnvironmentVariable(doc, tokens, raw_line, options, allocator, diagnostics);
+    if (std.mem.eql(u8, keyword, "ENVVAR_DATA_"))
+        return parseEnvironmentVariableData(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "VAL_TABLE_"))
         return parseValueTable(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SG_MUL_VAL_"))
@@ -269,20 +275,24 @@ fn parseLine(
     if (std.mem.eql(u8, keyword, "BA_DEF_") and tokens.len > 2 and tokens[2].kind == .string and std.mem.eql(u8, tokens[2].text, "VFrameFormat"))
         return parseFrameFormatDefinition(doc, tokens, frame_format_definition, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "BA_DEF_")) {
-        if (tokens.len > 3 and std.mem.eql(u8, tokens[1].text, "BO_") and tokens[2].kind == .string and std.mem.eql(u8, tokens[3].text, "INT"))
-            return parseMessageAttributeDefinition(doc, tokens, allocator, diagnostics);
-        return preserveOrReject(doc, tokens[0], raw_line, options, allocator, diagnostics);
+        return parseAttributeDefinition(doc, tokens, raw_line, options, allocator, diagnostics);
     }
     if (std.mem.eql(u8, keyword, "BA_DEF_DEF_")) {
-        if (tokens.len > 1 and tokens[1].kind == .string and isMessageIntegerAttribute(doc, tokens[1].text))
-            return parseMessageAttributeDefault(doc, tokens, allocator, diagnostics);
+        if (tokens.len > 1 and tokens[1].kind == .string) {
+            const name = decodeDbcString(doc.allocator(), tokens[1].text) catch
+                return lineError(allocator, diagnostics, tokens[1], "invalid DBC attribute name escape");
+            if (findAttributeDefinition(doc, name) != null)
+                return parseAttributeDefault(doc, tokens, allocator, diagnostics);
+        }
         return preserveOrReject(doc, tokens[0], raw_line, options, allocator, diagnostics);
     }
     if (std.mem.eql(u8, keyword, "BA_") and tokens.len > 1 and tokens[1].kind == .string and std.mem.eql(u8, tokens[1].text, "VFrameFormat"))
         return parseFrameFormatAssignment(doc, tokens, frame_format_definition, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "BA_") and tokens.len > 1 and tokens[1].kind == .string) {
-        if (tokens.len > 2 and std.mem.eql(u8, tokens[2].text, "BO_") and isMessageIntegerAttribute(doc, tokens[1].text))
-            return parseMessageAttributeAssignment(doc, tokens, allocator, diagnostics);
+        const name = decodeDbcString(doc.allocator(), tokens[1].text) catch
+            return lineError(allocator, diagnostics, tokens[1], "invalid DBC attribute name escape");
+        if (findAttributeDefinition(doc, name) != null)
+            return parseAttributeAssignment(doc, tokens, allocator, diagnostics);
         return preserveOrReject(doc, tokens[0], raw_line, options, allocator, diagnostics);
     }
     if (std.mem.eql(u8, keyword, "BU_")) {
@@ -333,6 +343,8 @@ fn parseLine(
         last_mux.* = null;
         return;
     }
+    if (std.mem.eql(u8, keyword, "BO_TX_BU_"))
+        return parseMessageTransmitters(doc, tokens, allocator, diagnostics);
     if (std.mem.eql(u8, keyword, "SG_")) {
         const message_index = current_message.* orelse return lineError(allocator, diagnostics, tokens[0], "SG_ signal must follow a BO_ message");
         if (message_index == independent_message) return;
@@ -497,6 +509,119 @@ fn parseMessageComment(
         return;
     }
     return lineError(allocator, diagnostics, tokens[2], "message comment references an unknown message");
+}
+
+fn parseEnvironmentVariable(
+    doc: *model.Document,
+    tokens: []const Token,
+    raw_statement: []const u8,
+    options: ParseOptions,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len < 15 or tokens[1].kind != .word or !std.mem.eql(u8, tokens[2].text, ":"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed environment variable declaration");
+    const type_code = std.fmt.parseInt(u8, tokens[3].text, 10) catch
+        return lineError(allocator, diagnostics, tokens[3], "invalid environment variable type code");
+    const variable_type: model.EnvironmentVariableType = switch (type_code) {
+        0 => .integer,
+        1 => .float,
+        2 => .string,
+        3 => .data,
+        else => return preserveOrReject(doc, tokens[0], raw_statement, options, allocator, diagnostics),
+    };
+    var index: usize = 4;
+    try expectToken(tokens, &index, "[", allocator, diagnostics);
+    const minimum = try readDecimal(tokens, &index, doc.allocator(), allocator, diagnostics);
+    try expectToken(tokens, &index, "|", allocator, diagnostics);
+    const maximum = try readDecimal(tokens, &index, doc.allocator(), allocator, diagnostics);
+    try expectToken(tokens, &index, "]", allocator, diagnostics);
+    if (index >= tokens.len or tokens[index].kind != .string)
+        return lineError(allocator, diagnostics, tokens[0], "environment variable unit must be a quoted string");
+    const unit = decodeDbcString(doc.allocator(), tokens[index].text) catch
+        return lineError(allocator, diagnostics, tokens[index], "invalid DBC string escape");
+    index += 1;
+    const initial_value = switch (variable_type) {
+        .integer, .float, .data => try readDecimal(tokens, &index, doc.allocator(), allocator, diagnostics),
+        .string => blk: {
+            if (index >= tokens.len or tokens[index].kind != .string)
+                return lineError(allocator, diagnostics, tokens[@min(index, tokens.len - 1)], "string environment variable initial value must be quoted");
+            const token = tokens[index];
+            index += 1;
+            break :blk decodeDbcString(doc.allocator(), token.text) catch return lineError(allocator, diagnostics, token, "invalid DBC string escape");
+        },
+    };
+    const ev_id_value = try readUnsigned(tokens, &index, allocator, diagnostics);
+    const ev_id = std.math.cast(u32, ev_id_value) orelse return lineError(allocator, diagnostics, tokens[index - 1], "environment variable ID exceeds model range");
+    const access_type_value = try readUnsigned(tokens, &index, allocator, diagnostics);
+    const access_type = std.math.cast(u32, access_type_value) orelse return lineError(allocator, diagnostics, tokens[index - 1], "environment variable access type exceeds model range");
+    var variable = model.EnvironmentVariable{
+        .name = try doc.allocator().dupe(u8, tokens[1].text),
+        .variable_type = variable_type,
+        .minimum = minimum,
+        .maximum = maximum,
+        .unit = try doc.allocator().dupe(u8, unit),
+        .initial_value = initial_value,
+        .ev_id = ev_id,
+        .access_type = access_type,
+    };
+    var expect_node = true;
+    var access_node_count: usize = 0;
+    while (index < tokens.len - 1) : (index += 1) {
+        const token = tokens[index];
+        if (expect_node) {
+            if (token.kind != .word) return lineError(allocator, diagnostics, token, "expected access node in environment variable declaration");
+            try variable.access_nodes.append(doc.allocator(), try doc.allocator().dupe(u8, token.text));
+            if (!std.mem.eql(u8, token.text, "DUMMY_NODE_VECTOR0") and !std.mem.eql(u8, token.text, "Vector__XXX") and !hasNode(doc, token.text))
+                try doc.nodes.append(doc.allocator(), .{ .name = try doc.allocator().dupe(u8, token.text) });
+            access_node_count += 1;
+            expect_node = false;
+        } else {
+            if (!std.mem.eql(u8, token.text, ",")) return lineError(allocator, diagnostics, token, "expected comma between environment variable access nodes");
+            expect_node = true;
+        }
+    }
+    if (access_node_count == 0 or expect_node)
+        return lineError(allocator, diagnostics, tokens[tokens.len - 1], "environment variable requires an access node list");
+    try expectAttributeSemicolon(tokens, index, allocator, diagnostics);
+    try doc.environment_variables.append(doc.allocator(), variable);
+}
+
+fn parseEnvironmentVariableData(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len != 5 or tokens[1].kind != .word or !std.mem.eql(u8, tokens[2].text, ":") or !std.mem.eql(u8, tokens[4].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed ENVVAR_DATA_ statement");
+    const size = std.fmt.parseInt(u32, tokens[3].text, 10) catch
+        return lineError(allocator, diagnostics, tokens[3], "invalid environment variable data size");
+    for (doc.environment_variables.items) |*variable| {
+        if (!std.mem.eql(u8, variable.name, tokens[1].text)) continue;
+        if (variable.data_size != null) return lineError(allocator, diagnostics, tokens[1], "duplicate ENVVAR_DATA_ declaration");
+        variable.data_size = size;
+        return;
+    }
+    return lineError(allocator, diagnostics, tokens[1], "ENVVAR_DATA_ references an unknown environment variable");
+}
+
+fn parseEnvironmentVariableComment(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len != 5 or tokens[2].kind != .word or tokens[3].kind != .string or !std.mem.eql(u8, tokens[4].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed environment variable comment");
+    for (doc.environment_variables.items) |*variable| {
+        if (!std.mem.eql(u8, variable.name, tokens[2].text)) continue;
+        if (variable.description != null) return lineError(allocator, diagnostics, tokens[0], "duplicate environment variable comment");
+        variable.description = decodeDbcString(doc.allocator(), tokens[3].text) catch
+            return lineError(allocator, diagnostics, tokens[3], "invalid DBC string escape");
+        return;
+    }
+    return lineError(allocator, diagnostics, tokens[2], "environment variable comment references an unknown variable");
 }
 
 fn parseValueTable(
@@ -697,70 +822,215 @@ fn parseFrameFormatAssignment(
     return lineError(allocator, diagnostics, tokens[3], "VFrameFormat assignment references an unknown message");
 }
 
-fn parseMessageAttributeDefinition(
+fn parseAttributeDefinition(
     doc: *model.Document,
     tokens: []const Token,
+    raw_statement: []const u8,
+    options: ParseOptions,
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
 ) Error!void {
-    if (tokens.len != 7 or !std.mem.eql(u8, tokens[1].text, "BO_") or tokens[2].kind != .string or !std.mem.eql(u8, tokens[3].text, "INT") or !std.mem.eql(u8, tokens[6].text, ";"))
-        return lineError(allocator, diagnostics, tokens[0], "unsupported or malformed message attribute definition");
-    var minimum_index: usize = 4;
-    const minimum = try readDecimal(tokens, &minimum_index, doc.allocator(), allocator, diagnostics);
-    const maximum = try readDecimal(tokens, &minimum_index, doc.allocator(), allocator, diagnostics);
-    if (minimum_index != 6) return lineError(allocator, diagnostics, tokens[minimum_index], "malformed message attribute bounds");
-    try doc.attribute_definitions.append(doc.allocator(), .{
-        .name = try decodeDbcString(doc.allocator(), tokens[2].text),
-        .scope = .message,
-        .value_type = .integer,
-        .minimum = minimum,
-        .maximum = maximum,
-    });
-}
-
-fn parseMessageAttributeDefault(
-    doc: *model.Document,
-    tokens: []const Token,
-    allocator: std.mem.Allocator,
-    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
-) Error!void {
-    if (tokens.len != 4 or tokens[1].kind != .string or !std.mem.eql(u8, tokens[3].text, ";"))
-        return lineError(allocator, diagnostics, tokens[0], "malformed message attribute default");
-    for (doc.attribute_definitions.items) |*definition| {
-        if (!std.mem.eql(u8, definition.name, tokens[1].text)) continue;
-        if (definition.scope != .message or definition.value_type != .integer)
-            return lineError(allocator, diagnostics, tokens[1], "unsupported message attribute default type");
-        var index: usize = 2;
-        definition.default = .{ .integer = try readDecimal(tokens, &index, doc.allocator(), allocator, diagnostics) };
-        return;
+    if (tokens.len < 4) return lineError(allocator, diagnostics, tokens[0], "malformed attribute definition");
+    var index: usize = 1;
+    var scope: model.AttributeScope = .document;
+    if (tokens[index].kind == .word) {
+        scope = if (std.mem.eql(u8, tokens[index].text, "BU_")) .node else if (std.mem.eql(u8, tokens[index].text, "BO_")) .message else if (std.mem.eql(u8, tokens[index].text, "SG_")) .signal else if (std.mem.eql(u8, tokens[index].text, "EV_")) .environment_variable else return preserveOrReject(doc, tokens[0], raw_statement, options, allocator, diagnostics);
+        index += 1;
     }
-    return lineError(allocator, diagnostics, tokens[1], "default references an unknown attribute definition");
+    if (index + 2 >= tokens.len or tokens[index].kind != .string or tokens[index + 1].kind != .word)
+        return lineError(allocator, diagnostics, tokens[0], "malformed attribute definition");
+    const name_token = tokens[index];
+    const type_token = tokens[index + 1];
+    index += 2;
+    const value_type: model.AttributeType = if (std.mem.eql(u8, type_token.text, "INT")) .integer else if (std.mem.eql(u8, type_token.text, "HEX")) .hex else if (std.mem.eql(u8, type_token.text, "FLOAT")) .float else if (std.mem.eql(u8, type_token.text, "STRING")) .string else if (std.mem.eql(u8, type_token.text, "ENUM")) .@"enum" else return preserveOrReject(doc, tokens[0], raw_statement, options, allocator, diagnostics);
+    const a = doc.allocator();
+    var definition = model.AttributeDefinition{
+        .name = decodeDbcString(a, name_token.text) catch return lineError(allocator, diagnostics, name_token, "invalid DBC attribute name escape"),
+        .scope = scope,
+        .value_type = value_type,
+    };
+    switch (value_type) {
+        .integer, .hex, .float => {
+            const minimum = try readAttributeValue(doc, &definition, tokens, &index, allocator, diagnostics);
+            const maximum = try readAttributeValue(doc, &definition, tokens, &index, allocator, diagnostics);
+            definition.minimum = attributeValueText(minimum).?;
+            definition.maximum = attributeValueText(maximum).?;
+        },
+        .string => {},
+        .@"enum" => {
+            var expect_label = true;
+            while (index < tokens.len and !std.mem.eql(u8, tokens[index].text, ";")) : (index += 1) {
+                const token = tokens[index];
+                if (expect_label) {
+                    if (token.kind != .string) return lineError(allocator, diagnostics, token, "expected quoted enum attribute label");
+                    try definition.enum_labels.append(a, decodeDbcString(a, token.text) catch return lineError(allocator, diagnostics, token, "invalid DBC enum label escape"));
+                    expect_label = false;
+                } else {
+                    if (!std.mem.eql(u8, token.text, ",")) return lineError(allocator, diagnostics, token, "expected comma between enum attribute labels");
+                    expect_label = true;
+                }
+            }
+            if (definition.enum_labels.items.len == 0 or expect_label)
+                return lineError(allocator, diagnostics, tokens[index], "enum attribute definition requires comma-separated labels");
+        },
+    }
+    try expectAttributeSemicolon(tokens, index, allocator, diagnostics);
+    try doc.attribute_definitions.append(a, definition);
 }
 
-fn parseMessageAttributeAssignment(
+fn parseAttributeDefault(
     doc: *model.Document,
     tokens: []const Token,
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
 ) Error!void {
-    if (tokens.len != 6 or !std.mem.eql(u8, tokens[2].text, "BO_") or !std.mem.eql(u8, tokens[5].text, ";"))
-        return lineError(allocator, diagnostics, tokens[0], "unsupported or malformed message attribute assignment");
-    const raw_id = std.fmt.parseInt(u32, tokens[3].text, 10) catch
-        return lineError(allocator, diagnostics, tokens[3], "invalid message attribute identifier");
+    if (tokens.len < 4 or tokens[1].kind != .string)
+        return lineError(allocator, diagnostics, tokens[0], "malformed attribute default");
+    const name = decodeDbcString(doc.allocator(), tokens[1].text) catch
+        return lineError(allocator, diagnostics, tokens[1], "invalid DBC attribute name escape");
+    const definition = findMutableAttributeDefinition(doc, name) orelse
+        return lineError(allocator, diagnostics, tokens[1], "default references an unknown attribute definition");
+    var index: usize = 2;
+    const value = try readAttributeValue(doc, definition, tokens, &index, allocator, diagnostics);
+    try expectAttributeSemicolon(tokens, index, allocator, diagnostics);
+    definition.default = value;
+}
+
+fn parseAttributeAssignment(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len < 4 or tokens[1].kind != .string)
+        return lineError(allocator, diagnostics, tokens[0], "malformed attribute assignment");
+    const name = decodeDbcString(doc.allocator(), tokens[1].text) catch
+        return lineError(allocator, diagnostics, tokens[1], "invalid DBC attribute name escape");
+    const definition = findAttributeDefinition(doc, name) orelse
+        return lineError(allocator, diagnostics, tokens[1], "assignment references an unknown attribute definition");
+    var scope: model.AttributeScope = .document;
+    var node_index: ?usize = null;
+    var message_index: ?usize = null;
+    var signal_index: ?usize = null;
+    var environment_variable_index: ?usize = null;
+    var value_index: usize = 2;
+    if (tokens[2].kind == .word and std.mem.eql(u8, tokens[2].text, "BU_")) {
+        if (tokens.len < 6 or tokens[3].kind != .word)
+            return lineError(allocator, diagnostics, tokens[2], "malformed node attribute assignment");
+        scope = .node;
+        for (doc.nodes.items, 0..) |node, index| {
+            if (std.mem.eql(u8, node.name, tokens[3].text)) {
+                node_index = index;
+                break;
+            }
+        }
+        if (node_index == null) return lineError(allocator, diagnostics, tokens[3], "attribute assignment references an unknown node");
+        value_index = 4;
+    } else if (tokens[2].kind == .word and (std.mem.eql(u8, tokens[2].text, "BO_") or std.mem.eql(u8, tokens[2].text, "SG_"))) {
+        const is_signal = std.mem.eql(u8, tokens[2].text, "SG_");
+        if (tokens.len < (if (is_signal) @as(usize, 7) else 6))
+            return lineError(allocator, diagnostics, tokens[2], "malformed message or signal attribute assignment");
+        const id_token = tokens[3];
+        const raw_id = std.fmt.parseInt(u32, id_token.text, 10) catch
+            return lineError(allocator, diagnostics, id_token, "invalid attribute assignment message identifier");
+        message_index = findMessageByDbcId(doc, raw_id) orelse
+            return lineError(allocator, diagnostics, id_token, "attribute assignment references an unknown message");
+        if (is_signal) {
+            scope = .signal;
+            if (tokens[4].kind != .word) return lineError(allocator, diagnostics, tokens[4], "invalid attribute assignment signal name");
+            for (doc.messages.items[message_index.?].signals.items, 0..) |signal, index| {
+                if (std.mem.eql(u8, signal.name, tokens[4].text)) {
+                    signal_index = index;
+                    break;
+                }
+            }
+            if (signal_index == null) return lineError(allocator, diagnostics, tokens[4], "attribute assignment references an unknown signal");
+            value_index = 5;
+        } else {
+            scope = .message;
+            value_index = 4;
+        }
+    } else if (tokens[2].kind == .word and std.mem.eql(u8, tokens[2].text, "EV_")) {
+        if (tokens.len < 6 or tokens[3].kind != .word)
+            return lineError(allocator, diagnostics, tokens[2], "malformed environment-variable attribute assignment");
+        scope = .environment_variable;
+        for (doc.environment_variables.items, 0..) |variable, index| {
+            if (std.mem.eql(u8, variable.name, tokens[3].text)) {
+                environment_variable_index = index;
+                break;
+            }
+        }
+        if (environment_variable_index == null) return lineError(allocator, diagnostics, tokens[3], "attribute assignment references an unknown environment variable");
+        value_index = 4;
+    }
+    if (definition.scope != scope)
+        return lineError(allocator, diagnostics, tokens[1], "attribute assignment scope does not match its definition");
+    var index = value_index;
+    const value = try readAttributeValue(doc, definition, tokens, &index, allocator, diagnostics);
+    try expectAttributeSemicolon(tokens, index, allocator, diagnostics);
+    const assignment = model.AttributeAssignment{ .name = name, .value = value };
+    const a = doc.allocator();
+    switch (scope) {
+        .document => try doc.attributes.append(a, assignment),
+        .node => try doc.nodes.items[node_index.?].attributes.append(a, assignment),
+        .message => try doc.messages.items[message_index.?].attributes.append(a, assignment),
+        .signal => try doc.messages.items[message_index.?].signals.items[signal_index.?].attributes.append(a, assignment),
+        .bus => return lineError(allocator, diagnostics, tokens[2], "bus attributes are not defined by this DBC profile"),
+        .environment_variable => try doc.environment_variables.items[environment_variable_index.?].attributes.append(a, assignment),
+    }
+}
+
+fn readAttributeValue(
+    doc: *model.Document,
+    definition: *const model.AttributeDefinition,
+    tokens: []const Token,
+    index: *usize,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!model.AttributeValue {
+    if (index.* >= tokens.len) return lineError(allocator, diagnostics, tokens[tokens.len - 1], "missing attribute value");
+    const token = tokens[index.*];
+    return switch (definition.value_type) {
+        .integer => .{ .integer = try readDecimal(tokens, index, doc.allocator(), allocator, diagnostics) },
+        .hex => blk: {
+            if (token.kind != .word) return lineError(allocator, diagnostics, token, "invalid hexadecimal attribute value");
+            index.* += 1;
+            break :blk .{ .hex = try doc.allocator().dupe(u8, token.text) };
+        },
+        .float => .{ .float = try readDecimal(tokens, index, doc.allocator(), allocator, diagnostics) },
+        .string => blk: {
+            if (token.kind != .string) return lineError(allocator, diagnostics, token, "expected quoted string attribute value");
+            index.* += 1;
+            break :blk .{ .string = decodeDbcString(doc.allocator(), token.text) catch return lineError(allocator, diagnostics, token, "invalid DBC attribute string escape") };
+        },
+        .@"enum" => blk: {
+            if (token.kind != .word) return lineError(allocator, diagnostics, token, "invalid enum attribute index");
+            index.* += 1;
+            break :blk .{ .enum_index = std.fmt.parseInt(u32, token.text, 10) catch return lineError(allocator, diagnostics, token, "invalid enum attribute index") };
+        },
+    };
+}
+
+fn attributeValueText(value: model.AttributeValue) ?[]const u8 {
+    return switch (value) {
+        .integer, .hex, .float => |text| text,
+        .string, .enum_index => null,
+    };
+}
+
+fn expectAttributeSemicolon(tokens: []const Token, index: usize, allocator: std.mem.Allocator, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic)) Error!void {
+    if (index != tokens.len - 1 or !std.mem.eql(u8, tokens[index].text, ";"))
+        return lineError(allocator, diagnostics, tokens[@min(index, tokens.len - 1)], "malformed attribute statement terminator");
+}
+
+fn findMessageByDbcId(doc: *const model.Document, raw_id: u32) ?usize {
     const id = raw_id & 0x1fffffff;
     const extended = raw_id & 0x80000000 != 0;
-    for (doc.messages.items) |*message| {
+    for (doc.messages.items, 0..) |message, index| {
         const message_id = std.fmt.parseInt(u32, message.id[2..], 16) catch continue;
-        if (message_id != id or message.extended != extended) continue;
-        var index: usize = 4;
-        const value = try readDecimal(tokens, &index, doc.allocator(), allocator, diagnostics);
-        try message.attributes.append(doc.allocator(), .{
-            .name = try decodeDbcString(doc.allocator(), tokens[1].text),
-            .value = .{ .integer = value },
-        });
-        return;
+        if (message_id == id and message.extended == extended) return index;
     }
-    return lineError(allocator, diagnostics, tokens[3], "attribute assignment references an unknown message");
+    return null;
 }
 
 fn containsEnumValue(values: []const u16, expected: u16) bool {
@@ -900,9 +1170,11 @@ fn findAttributeDefinition(doc: *const model.Document, name: []const u8) ?*const
     return null;
 }
 
-fn isMessageIntegerAttribute(doc: *const model.Document, name: []const u8) bool {
-    const definition = findAttributeDefinition(doc, name) orelse return false;
-    return definition.scope == .message and definition.value_type == .integer;
+fn findMutableAttributeDefinition(doc: *model.Document, name: []const u8) ?*model.AttributeDefinition {
+    for (doc.attribute_definitions.items) |*definition| {
+        if (std.mem.eql(u8, definition.name, name)) return definition;
+    }
+    return null;
 }
 
 fn signalChoices(doc: *const model.Document, signal: model.Signal) []const model.Choice {
@@ -917,6 +1189,59 @@ pub fn write(allocator: std.mem.Allocator, doc: *const model.Document) Error![]u
     return writeWithDiagnostics(allocator, doc, &diagnostics);
 }
 
+/// Exports one bus by name. DBC has no bus-name field, so non-can0 names are not retained.
+pub fn writeForBus(allocator: std.mem.Allocator, doc: *const model.Document, bus_name: []const u8) Error![]u8 {
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    return writeForBusWithDiagnostics(allocator, doc, bus_name, &diagnostics);
+}
+
+/// Like `writeForBus`, but appends a warning when the selected bus name cannot be represented.
+pub fn writeForBusWithDiagnostics(
+    allocator: std.mem.Allocator,
+    doc: *const model.Document,
+    bus_name: []const u8,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error![]u8 {
+    const bus = findBusByName(doc, bus_name) orelse {
+        try diagnostics.append(allocator, .{
+            .severity = .@"error",
+            .code = .unknown_bus,
+            .message = "selected DBC export bus is not defined",
+            .context = .{ .bus = bus_name },
+        });
+        return error.UnknownBus;
+    };
+    if (!std.mem.eql(u8, bus.name, "can0"))
+        try warn(allocator, diagnostics, "selected bus name is not represented in DBC; imported bus defaults to can0", .{ .bus = bus.name });
+
+    var selected = model.Document.init(allocator);
+    defer selected.deinit();
+    const a = selected.allocator();
+    selected.format = doc.format;
+    selected.format_version = doc.format_version;
+    selected.name = doc.name;
+    selected.description = doc.description;
+    try selected.attributes.appendSlice(a, doc.attributes.items);
+    try selected.value_tables.appendSlice(a, doc.value_tables.items);
+    try selected.attribute_definitions.appendSlice(a, doc.attribute_definitions.items);
+    try selected.environment_variables.appendSlice(a, doc.environment_variables.items);
+    try selected.nodes.appendSlice(a, doc.nodes.items);
+    selected.dbc = doc.dbc;
+    selected.extensions = doc.extensions;
+    selected.buses.append(a, .{ .name = "can0" }) catch return error.OutOfMemory;
+    for (doc.messages.items) |message| {
+        if (std.mem.eql(u8, message.bus, bus_name)) try selected.messages.append(a, message);
+    }
+    return writeWithDiagnostics(allocator, &selected, diagnostics);
+}
+fn findBusByName(doc: *const model.Document, name: []const u8) ?*const model.Bus {
+    for (doc.buses.items) |*bus| {
+        if (std.mem.eql(u8, bus.name, name)) return bus;
+    }
+    return null;
+}
+
 /// Like `write`, but appends warnings for omitted metadata and errors for export blockers.
 /// Messages are static; contexts borrow from `doc`.
 pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Document, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic)) Error![]u8 {
@@ -925,7 +1250,7 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     const bus_name: ?[]const u8 = if (doc.buses.items.len > 0) doc.buses.items[0].name else null;
     const bus_ctx: diagnostic.Context = .{ .bus = bus_name };
     if (doc.buses.items.len > 1) try blocker(allocator, diagnostics, "more than one bus cannot be exported", .{});
-    if (doc.attributes.items.len > 0) try blocker(allocator, diagnostics, "document-level attribute assignments cannot be exported", .{});
+    try checkAttributeAssignments(allocator, diagnostics, &doc.attributes, .document, doc, .{});
     for (doc.value_tables.items) |table| {
         if (!isIdentifier(table.name)) try blocker(allocator, diagnostics, "value table name is not a valid DBC identifier", .{});
         for (table.choices.items) |choice| {
@@ -958,18 +1283,36 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         }
     }
     for (doc.attribute_definitions.items) |definition| {
-        if (definition.scope != .message or definition.value_type != .integer or definition.minimum == null or definition.maximum == null)
-            try blocker(allocator, diagnostics, "only bounded message integer attribute definitions can be exported", .{});
+        if (definition.scope == .bus)
+            try blocker(allocator, diagnostics, "bus attribute definitions cannot be exported", .{});
+        switch (definition.value_type) {
+            .integer, .hex, .float => {
+                if (definition.minimum == null or definition.maximum == null or
+                    !validAttributeNumber(definition.value_type, definition.minimum orelse "") or
+                    !validAttributeNumber(definition.value_type, definition.maximum orelse ""))
+                    try blocker(allocator, diagnostics, "numeric attribute definitions require valid minimum and maximum values", .{});
+            },
+            .string => if (definition.minimum != null or definition.maximum != null or definition.enum_labels.items.len > 0)
+                try blocker(allocator, diagnostics, "string attribute definitions cannot have bounds or enum labels", .{}),
+            .@"enum" => if (definition.minimum != null or definition.maximum != null or definition.enum_labels.items.len == 0)
+                try blocker(allocator, diagnostics, "enum attribute definitions require labels and cannot have numeric bounds", .{}),
+        }
         if (definition.default) |default| {
-            if (default != .integer) try blocker(allocator, diagnostics, "only integer attribute defaults can be exported", .{});
+            if (!validAttributeValue(&definition, default))
+                try blocker(allocator, diagnostics, "attribute default does not match its definition", .{});
         }
         if (definition.dbc != null or definition.extensions != null)
             try blocker(allocator, diagnostics, "attribute definition metadata cannot be exported", .{});
         if (!validDbcString(definition.name)) try blocker(allocator, diagnostics, "attribute name contains unsupported control characters", .{});
+        for (definition.enum_labels.items) |label| {
+            if (!validDbcString(label)) try blocker(allocator, diagnostics, "attribute enum label contains unsupported control characters", .{});
+        }
     }
     if (doc.buses.items.len == 1) {
         const bus = doc.buses.items[0];
         if (!std.mem.eql(u8, bus.name, "can0")) try blocker(allocator, diagnostics, "bus must be named can0", bus_ctx);
+        if (bus.nominal_bitrate != null or bus.data_bitrate != null)
+            try blocker(allocator, diagnostics, "bus bitrate fields cannot be represented by the supported DBC BS_ profile", bus_ctx);
         if (bus.description != null) try blocker(allocator, diagnostics, "bus description cannot be exported", bus_ctx);
         if (bus.protocol != null) try blocker(allocator, diagnostics, "bus protocol cannot be exported", bus_ctx);
         if (bus.attributes.items.len > 0) try blocker(allocator, diagnostics, "bus attributes cannot be exported", bus_ctx);
@@ -980,8 +1323,28 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         if (node.description) |description| {
             if (!validDbcString(description)) try blocker(allocator, diagnostics, "node description contains unsupported control characters", .{});
         }
-        if (node.attributes.items.len > 0) try blocker(allocator, diagnostics, "node attributes cannot be exported", .{});
+        try checkAttributeAssignments(allocator, diagnostics, &node.attributes, .node, doc, .{});
         if (node.dbc != null or node.extensions != null) try blocker(allocator, diagnostics, "node dbc metadata and extensions cannot be exported", .{});
+    }
+    for (doc.environment_variables.items) |variable| {
+        if (!isIdentifier(variable.name)) try blocker(allocator, diagnostics, "environment variable name is not a valid DBC identifier", .{});
+        if (!validDbcString(variable.minimum) or !validDbcString(variable.maximum) or !validDbcString(variable.unit) or !validDbcString(variable.initial_value))
+            try blocker(allocator, diagnostics, "environment variable contains unsupported control characters", .{});
+        switch (variable.variable_type) {
+            .integer, .data => if (!validAttributeNumber(.integer, variable.initial_value))
+                try blocker(allocator, diagnostics, "environment variable initial value is not a valid integer", .{}),
+            .float => if (!validAttributeNumber(.float, variable.initial_value))
+                try blocker(allocator, diagnostics, "environment variable initial value is not a valid float", .{}),
+            .string => {},
+        }
+        if (variable.variable_type == .data and variable.data_size == null)
+            try blocker(allocator, diagnostics, "data environment variable requires ENVVAR_DATA_ size", .{});
+        for (variable.access_nodes.items) |node_name| {
+            if (!isIdentifier(node_name)) try blocker(allocator, diagnostics, "environment variable access node is not a valid DBC identifier", .{});
+        }
+        try checkAttributeAssignments(allocator, diagnostics, &variable.attributes, .environment_variable, doc, .{});
+        if (variable.dbc != null or variable.extensions != null)
+            try blocker(allocator, diagnostics, "environment variable dbc metadata and extensions cannot be exported", .{});
     }
     if (opaque_statements) |statements| {
         for (statements.items) |statement| {
@@ -995,17 +1358,15 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             if (!validDbcString(description)) try blocker(allocator, diagnostics, "message description contains unsupported control characters", mctx);
         }
         if (message.dbc != null or message.extensions != null) try blocker(allocator, diagnostics, "message dbc metadata and extensions cannot be exported", mctx);
-        if (message.transmitters.items.len > 1) try blocker(allocator, diagnostics, "more than one transmitter cannot be exported", mctx);
         if (!isIdentifier(message.name)) try blocker(allocator, diagnostics, "message name is not a valid DBC identifier", mctx);
-        if (message.transmitters.items.len == 1 and !isIdentifier(message.transmitters.items[0])) try blocker(allocator, diagnostics, "transmitter name is not a valid DBC identifier", mctx);
-        for (message.attributes.items) |assignment| {
-            const definition = findAttributeDefinition(doc, assignment.name) orelse {
-                try blocker(allocator, diagnostics, "message attribute assignment has no definition", mctx);
-                continue;
-            };
-            if (definition.scope != .message or definition.value_type != .integer or assignment.value != .integer)
-                try blocker(allocator, diagnostics, "only message integer attribute assignments can be exported", mctx);
+        for (message.transmitters.items, 0..) |transmitter, transmitter_index| {
+            if (!isIdentifier(transmitter)) try blocker(allocator, diagnostics, "transmitter name is not a valid DBC identifier", mctx);
+            for (message.transmitters.items[0..transmitter_index]) |earlier| {
+                if (std.mem.eql(u8, transmitter, earlier))
+                    try blocker(allocator, diagnostics, "message transmitter names must be unique", mctx);
+            }
         }
+        try checkAttributeAssignments(allocator, diagnostics, &message.attributes, .message, doc, mctx);
         for (message.signals.items) |signal| {
             const sctx: diagnostic.Context = .{ .bus = bus_name, .message = message.name, .signal = signal.name };
             if (signal.when.items.len > 0) {
@@ -1022,10 +1383,14 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             if (signal.description) |description| {
                 if (!validDbcString(description)) try blocker(allocator, diagnostics, "signal description contains unsupported control characters", sctx);
             }
-            if (signal.attributes.items.len > 0) try blocker(allocator, diagnostics, "signal attributes cannot be exported", sctx);
+            try checkAttributeAssignments(allocator, diagnostics, &signal.attributes, .signal, doc, sctx);
             if (signal.value_table) |table_name| {
                 if (findValueTable(doc, table_name) == null) try blocker(allocator, diagnostics, "signal references an unknown value table", sctx);
+                if (findValueTable(doc, table_name) != null)
+                    try warn(allocator, diagnostics, "signal value-table name is emitted as inline VAL_ values and is not preserved", sctx);
             }
+            if (signal.minimum == null or signal.maximum == null)
+                try warn(allocator, diagnostics, "missing signal bounds are written as [0|0]", sctx);
             if (signal.dbc != null or signal.extensions != null) try blocker(allocator, diagnostics, "signal dbc metadata and extensions cannot be exported", sctx);
             if (!isIdentifier(signal.name)) try blocker(allocator, diagnostics, "signal name is not a valid DBC identifier", sctx);
             for (signal.receivers.items) |receiver| if (!isIdentifier(receiver)) try blocker(allocator, diagnostics, "receiver name is not a valid DBC identifier", sctx);
@@ -1059,6 +1424,9 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
     }
     for (doc.nodes.items) |node| {
         if (node.description != null) has_comments = true;
+    }
+    for (doc.environment_variables.items) |variable| {
+        if (variable.description != null) has_comments = true;
     }
     if (doc.description != null) has_comments = true;
     if (has_comments) try appendText(allocator, &output, "\n  CM_");
@@ -1121,6 +1489,40 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             }
         }
     }
+    for (doc.messages.items) |message| {
+        if (message.transmitters.items.len < 2) continue;
+        const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
+        const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
+        try appendFmt(allocator, &output, "BO_TX_BU_ {d} : ", .{raw_id});
+        for (message.transmitters.items[1..], 0..) |transmitter, index| {
+            if (index > 0) try appendText(allocator, &output, ",");
+            try appendText(allocator, &output, transmitter);
+        }
+        try appendText(allocator, &output, ";\n");
+    }
+    for (doc.environment_variables.items) |variable| {
+        const type_code: u8 = switch (variable.variable_type) {
+            .integer => 0,
+            .float => 1,
+            .string => 2,
+            .data => 3,
+        };
+        try appendFmt(allocator, &output, "EV_ {s} : {d} [{s}|{s}] ", .{ variable.name, type_code, variable.minimum, variable.maximum });
+        try appendDbcString(allocator, &output, variable.unit);
+        try appendText(allocator, &output, " ");
+        if (variable.variable_type == .string) {
+            try appendDbcString(allocator, &output, variable.initial_value);
+        } else {
+            try appendText(allocator, &output, variable.initial_value);
+        }
+        try appendFmt(allocator, &output, " {d} {d} ", .{ variable.ev_id, variable.access_type });
+        for (variable.access_nodes.items, 0..) |node_name, index| {
+            if (index > 0) try appendText(allocator, &output, ",");
+            try appendText(allocator, &output, node_name);
+        }
+        try appendText(allocator, &output, ";\n");
+        if (variable.data_size) |size| try appendFmt(allocator, &output, "ENVVAR_DATA_ {s} : {d};\n", .{ variable.name, size });
+    }
     if (doc.description) |description| {
         try appendText(allocator, &output, "CM_ ");
         try appendDbcString(allocator, &output, description);
@@ -1149,19 +1551,50 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             try appendText(allocator, &output, ";\n");
         }
     }
+    for (doc.environment_variables.items) |variable| {
+        if (variable.description) |description| {
+            try appendFmt(allocator, &output, "CM_ EV_ {s} ", .{variable.name});
+            try appendDbcString(allocator, &output, description);
+            try appendText(allocator, &output, ";\n");
+        }
+    }
     if (has_fd_frames) {
         try appendText(allocator, &output, "BA_DEF_ BO_ \"VFrameFormat\" ENUM \"StandardCAN\",\"ExtendedCAN\",\"J1939PG\",\"J1939PG_21\",\"J1939PG_22\",\"J1939PG_23\",\"J1939PG_24\",\"J1939PG_25\",\"J1939PG_26\",\"J1939PG_27\",\"J1939PG_28\",\"J1939PG_29\",\"J1939PG_30\",\"J1939PG_31\",\"StandardCAN_FD\",\"ExtendedCAN_FD\",\"J1939PG_FD\";\n");
     }
     for (doc.attribute_definitions.items) |definition| {
-        try appendText(allocator, &output, "BA_DEF_ BO_ ");
+        try appendText(allocator, &output, "BA_DEF_");
+        switch (definition.scope) {
+            .document => {},
+            .node => try appendText(allocator, &output, " BU_"),
+            .message => try appendText(allocator, &output, " BO_"),
+            .signal => try appendText(allocator, &output, " SG_"),
+            .environment_variable => try appendText(allocator, &output, " EV_"),
+            .bus => unreachable,
+        }
+        try appendText(allocator, &output, " ");
         try appendDbcString(allocator, &output, definition.name);
-        try appendFmt(allocator, &output, " INT {s} {s};\n", .{ definition.minimum.?, definition.maximum.? });
+        switch (definition.value_type) {
+            .integer => try appendFmt(allocator, &output, " INT {s} {s}", .{ definition.minimum.?, definition.maximum.? }),
+            .hex => try appendFmt(allocator, &output, " HEX {s} {s}", .{ definition.minimum.?, definition.maximum.? }),
+            .float => try appendFmt(allocator, &output, " FLOAT {s} {s}", .{ definition.minimum.?, definition.maximum.? }),
+            .string => try appendText(allocator, &output, " STRING"),
+            .@"enum" => {
+                try appendText(allocator, &output, " ENUM ");
+                for (definition.enum_labels.items, 0..) |label, index| {
+                    if (index > 0) try appendText(allocator, &output, ",");
+                    try appendDbcString(allocator, &output, label);
+                }
+            },
+        }
+        try appendText(allocator, &output, ";\n");
     }
     for (doc.attribute_definitions.items) |definition| {
         if (definition.default) |default| {
             try appendText(allocator, &output, "BA_DEF_DEF_ ");
             try appendDbcString(allocator, &output, definition.name);
-            try appendFmt(allocator, &output, " {s};\n", .{default.integer});
+            try appendText(allocator, &output, " ");
+            try appendAttributeValue(allocator, &output, default);
+            try appendText(allocator, &output, ";\n");
         }
     }
     if (has_fd_frames) {
@@ -1173,13 +1606,49 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
             try appendFmt(allocator, &output, "BA_ \"VFrameFormat\" BO_ {d} {d};\n", .{ raw_id, format });
         }
     }
+    for (doc.attributes.items) |assignment| {
+        try appendText(allocator, &output, "BA_ ");
+        try appendDbcString(allocator, &output, assignment.name);
+        try appendText(allocator, &output, " ");
+        try appendAttributeValue(allocator, &output, assignment.value);
+        try appendText(allocator, &output, ";\n");
+    }
+    for (doc.nodes.items) |node| {
+        for (node.attributes.items) |assignment| {
+            try appendText(allocator, &output, "BA_ ");
+            try appendDbcString(allocator, &output, assignment.name);
+            try appendFmt(allocator, &output, " BU_ {s} ", .{node.name});
+            try appendAttributeValue(allocator, &output, assignment.value);
+            try appendText(allocator, &output, ";\n");
+        }
+    }
     for (doc.messages.items) |message| {
         const id = std.fmt.parseInt(u32, message.id[2..], 16) catch return error.InvalidDbc;
         const raw_id = id | (if (message.extended) @as(u32, 0x80000000) else 0);
         for (message.attributes.items) |assignment| {
             try appendText(allocator, &output, "BA_ ");
             try appendDbcString(allocator, &output, assignment.name);
-            try appendFmt(allocator, &output, " BO_ {d} {s};\n", .{ raw_id, assignment.value.integer });
+            try appendFmt(allocator, &output, " BO_ {d} ", .{raw_id});
+            try appendAttributeValue(allocator, &output, assignment.value);
+            try appendText(allocator, &output, ";\n");
+        }
+        for (message.signals.items) |signal| {
+            for (signal.attributes.items) |assignment| {
+                try appendText(allocator, &output, "BA_ ");
+                try appendDbcString(allocator, &output, assignment.name);
+                try appendFmt(allocator, &output, " SG_ {d} {s} ", .{ raw_id, signal.name });
+                try appendAttributeValue(allocator, &output, assignment.value);
+                try appendText(allocator, &output, ";\n");
+            }
+        }
+    }
+    for (doc.environment_variables.items) |variable| {
+        for (variable.attributes.items) |assignment| {
+            try appendText(allocator, &output, "BA_ ");
+            try appendDbcString(allocator, &output, assignment.name);
+            try appendFmt(allocator, &output, " EV_ {s} ", .{variable.name});
+            try appendAttributeValue(allocator, &output, assignment.value);
+            try appendText(allocator, &output, ";\n");
         }
     }
     // Section order follows the DBC grammar; Vector's CANdb++ rejects later records that appear early.
@@ -1228,6 +1697,61 @@ pub fn writeWithDiagnostics(allocator: std.mem.Allocator, doc: *const model.Docu
         }
     }
     return output.toOwnedSlice(allocator);
+}
+
+fn checkAttributeAssignments(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+    assignments: *const std.ArrayListUnmanaged(model.AttributeAssignment),
+    scope: model.AttributeScope,
+    doc: *const model.Document,
+    context: diagnostic.Context,
+) std.mem.Allocator.Error!void {
+    for (assignments.items) |assignment| {
+        const definition = findAttributeDefinition(doc, assignment.name) orelse {
+            try blocker(allocator, diagnostics, "attribute assignment has no definition", context);
+            continue;
+        };
+        if (definition.scope != scope or !validAttributeValue(definition, assignment.value))
+            try blocker(allocator, diagnostics, "attribute assignment does not match its definition", context);
+    }
+}
+
+fn validAttributeValue(definition: *const model.AttributeDefinition, value: model.AttributeValue) bool {
+    return switch (value) {
+        .integer => |text| definition.value_type == .integer and validAttributeNumber(.integer, text),
+        .hex => |text| definition.value_type == .hex and validAttributeNumber(.hex, text),
+        .float => |text| definition.value_type == .float and validAttributeNumber(.float, text),
+        .string => |text| definition.value_type == .string and validDbcString(text),
+        .enum_index => |index| definition.value_type == .@"enum" and index < definition.enum_labels.items.len,
+    };
+}
+
+fn validAttributeNumber(value_type: model.AttributeType, text: []const u8) bool {
+    return switch (value_type) {
+        .integer => blk: {
+            _ = std.fmt.parseInt(i64, text, 10) catch break :blk false;
+            break :blk true;
+        },
+        .hex => blk: {
+            if (text.len < 3 or text[0] != '0' or (text[1] != 'x' and text[1] != 'X')) break :blk false;
+            _ = std.fmt.parseInt(u64, text[2..], 16) catch break :blk false;
+            break :blk true;
+        },
+        .float => blk: {
+            const value = std.fmt.parseFloat(f64, text) catch break :blk false;
+            break :blk std.math.isFinite(value);
+        },
+        .string, .@"enum" => false,
+    };
+}
+
+fn appendAttributeValue(allocator: std.mem.Allocator, output: *std.ArrayListUnmanaged(u8), value: model.AttributeValue) Error!void {
+    switch (value) {
+        .integer, .hex, .float => |text| try appendText(allocator, output, text),
+        .string => |text| try appendDbcString(allocator, output, text),
+        .enum_index => |index| try appendFmt(allocator, output, "{d}", .{index}),
+    }
 }
 
 fn blocker(allocator: std.mem.Allocator, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic), message: []const u8, context: diagnostic.Context) std.mem.Allocator.Error!void {
@@ -1298,7 +1822,7 @@ fn validOpaqueStatement(statement: std.json.Value) bool {
 fn isIdentifier(text: []const u8) bool {
     if (text.len == 0) return false;
     for (text) |ch| {
-        if (std.ascii.isWhitespace(ch) or std.mem.indexOfScalar(u8, ":|@+-,()[];\"", ch) != null) return false;
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
     }
     return true;
 }
@@ -1365,6 +1889,54 @@ fn ensureDbcObject(doc: *model.Document) Error!std.json.ObjectMap {
 fn hasNode(doc: *const model.Document, name: []const u8) bool {
     for (doc.nodes.items) |node| if (std.mem.eql(u8, node.name, name)) return true;
     return false;
+}
+
+fn parseMessageTransmitters(
+    doc: *model.Document,
+    tokens: []const Token,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
+) Error!void {
+    if (tokens.len < 5 or !std.mem.eql(u8, tokens[2].text, ":") or !std.mem.eql(u8, tokens[tokens.len - 1].text, ";"))
+        return lineError(allocator, diagnostics, tokens[0], "malformed BO_TX_BU_ statement");
+    const raw_id = std.fmt.parseInt(u32, tokens[1].text, 10) catch
+        return lineError(allocator, diagnostics, tokens[1], "invalid BO_TX_BU_ message identifier");
+    const id = raw_id & 0x1fffffff;
+    const extended = raw_id & 0x80000000 != 0;
+    var message_index: ?usize = null;
+    for (doc.messages.items, 0..) |message, index| {
+        const message_id = std.fmt.parseInt(u32, message.id[2..], 16) catch continue;
+        if (message_id == id and message.extended == extended) {
+            message_index = index;
+            break;
+        }
+    }
+    const index = message_index orelse return lineError(allocator, diagnostics, tokens[1], "BO_TX_BU_ references an unknown message");
+    var message = &doc.messages.items[index];
+    var expect_node = true;
+    var node_count: usize = 0;
+    var token_index: usize = 3;
+    while (token_index < tokens.len - 1) : (token_index += 1) {
+        const token = tokens[token_index];
+        if (expect_node) {
+            if (token.kind != .word) return lineError(allocator, diagnostics, token, "expected transmitter name in BO_TX_BU_");
+            for (message.transmitters.items) |existing| {
+                if (std.mem.eql(u8, existing, token.text))
+                    return lineError(allocator, diagnostics, token, "duplicate BO_TX_BU_ transmitter");
+            }
+            node_count += 1;
+            if (!std.mem.eql(u8, token.text, "Vector__XXX")) {
+                const a = doc.allocator();
+                if (!hasNode(doc, token.text)) try doc.nodes.append(a, .{ .name = try a.dupe(u8, token.text) });
+                try message.transmitters.append(a, try a.dupe(u8, token.text));
+            }
+            expect_node = false;
+        } else {
+            if (!std.mem.eql(u8, token.text, ",")) return lineError(allocator, diagnostics, token, "expected comma between BO_TX_BU_ transmitters");
+            expect_node = true;
+        }
+    }
+    if (node_count == 0 or expect_node) return lineError(allocator, diagnostics, tokens[tokens.len - 1], "malformed BO_TX_BU_ transmitter list");
 }
 
 fn lineError(allocator: std.mem.Allocator, diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic), token: Token, message: []const u8) Error {
@@ -1467,6 +2039,51 @@ test "signal comments import and export with DBC string escaping" {
     try std.testing.expectEqualStrings(description, reparsed.messages.items[0].signals.items[0].description.?);
 }
 
+test "BO_TX_BU_ transmitter relationships import and export" {
+    const source =
+        \\BU_: ECU DASH TS
+        \\BO_ 291 Engine: 1 ECU
+        \\BO_TX_BU_ 291 : DASH,TS;
+        \\BO_ 2147483939 Extended: 1 ECU
+        \\BO_TX_BU_ 2147483939 : DASH;
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(usize, 3), doc.messages.items[0].transmitters.items.len);
+    try std.testing.expectEqualStrings("ECU", doc.messages.items[0].transmitters.items[0]);
+    try std.testing.expectEqualStrings("DASH", doc.messages.items[0].transmitters.items[1]);
+    try std.testing.expectEqualStrings("TS", doc.messages.items[0].transmitters.items[2]);
+    try std.testing.expectEqual(@as(usize, 2), doc.messages.items[1].transmitters.items.len);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BO_TX_BU_ 291 : DASH,TS;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BO_TX_BU_ 2147483939 : DASH;\n") != null);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reparsed.messages.items[0].transmitters.items.len);
+    try std.testing.expectEqualStrings("TS", reparsed.messages.items[0].transmitters.items[2]);
+    try std.testing.expectEqual(@as(usize, 2), reparsed.messages.items[1].transmitters.items.len);
+    try std.testing.expectEqualStrings("DASH", reparsed.messages.items[1].transmitters.items[1]);
+}
+
+test "BO_TX_BU_ rejects unknown messages, duplicate transmitters, and malformed lists" {
+    const cases = [_][]const u8{
+        "BO_ 1 M: 1 ECU\nBO_TX_BU_ 2 : DASH;\n",
+        "BO_ 1 M: 1 ECU\nBO_TX_BU_ 1 : ECU;\n",
+        "BO_ 1 M: 1 ECU\nBO_TX_BU_ 1 : DASH,;\n",
+    };
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    for (cases) |source| {
+        diagnostics.clearRetainingCapacity();
+        try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
+        try std.testing.expectEqual(@as(u32, 2), diagnostics.items[0].source.dbc.line);
+    }
+}
+
 test "multiple signal receivers are comma separated" {
     const source =
         \\BU_: ECU DASH TS
@@ -1518,6 +2135,140 @@ test "message comments and value tables import and export" {
     try std.testing.expectEqualStrings("Off;off", reparsed.value_tables.items[0].choices.items[1].label);
 }
 
+test "DBC export warns about inlined value tables and synthesized signal bounds" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    const a = doc.allocator();
+    try doc.value_tables.append(a, .{ .name = "Modes" });
+    try doc.value_tables.items[0].choices.append(a, .{ .raw = "0", .label = "Off" });
+    const signal = model.Signal{
+        .name = "Mode",
+        .start_bit = 0,
+        .bit_length = 8,
+        .byte_order = .little_endian,
+        .signal_type = .unsigned,
+        .value_table = "Modes",
+    };
+    var message = model.Message{
+        .name = "Status",
+        .bus = "can0",
+        .id = "0x1",
+        .extended = false,
+        .frame = .classic,
+        .length = 1,
+    };
+    try message.signals.append(a, signal);
+    try doc.messages.append(a, message);
+
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    const output = try writeWithDiagnostics(std.testing.allocator, &doc, &diagnostics);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.items.len);
+    try std.testing.expectEqualStrings("signal value-table name is emitted as inline VAL_ values and is not preserved", diagnostics.items[0].message);
+    try std.testing.expectEqualStrings("missing signal bounds are written as [0|0]", diagnostics.items[1].message);
+    try std.testing.expect(std.mem.indexOf(u8, output, "VAL_TABLE_ Modes 0 \"Off\" ;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "VAL_ 1 Mode 0 \"Off\";") != null);
+}
+
+test "DBC export blocks bus bitrates without a supported BS_ mapping" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    try doc.buses.append(doc.allocator(), .{ .name = "can0", .nominal_bitrate = 500000 });
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.UnsupportedConstruct, writeWithDiagnostics(std.testing.allocator, &doc, &diagnostics));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqualStrings("bus bitrate fields cannot be represented by the supported DBC BS_ profile", diagnostics.items[0].message);
+}
+
+test "selected-bus DBC export filters messages and warns about unrepresentable names" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    const a = doc.allocator();
+    try doc.buses.append(a, .{ .name = "can0" });
+    try doc.buses.append(a, .{ .name = "can1" });
+    try doc.nodes.append(a, .{ .name = "ECU0" });
+    try doc.nodes.append(a, .{ .name = "ECU1" });
+    var first = model.Message{
+        .name = "First",
+        .bus = "can0",
+        .id = "0x1",
+        .extended = false,
+        .frame = .classic,
+        .length = 1,
+    };
+    try first.transmitters.append(a, "ECU0");
+    var second = model.Message{
+        .name = "Second",
+        .bus = "can1",
+        .id = "0x1",
+        .extended = false,
+        .frame = .classic,
+        .length = 1,
+    };
+    try second.transmitters.append(a, "ECU1");
+    try doc.messages.append(a, first);
+    try doc.messages.append(a, second);
+
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    const output = try writeForBusWithDiagnostics(std.testing.allocator, &doc, "can1", &diagnostics);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(diagnostic.Severity.warning, diagnostics.items[0].severity);
+    try std.testing.expectEqualStrings("can1", diagnostics.items[0].context.bus.?);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BO_ 1 Second: 1 ECU1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "First") == null);
+
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), reparsed.messages.items.len);
+    try std.testing.expectEqualStrings("Second", reparsed.messages.items[0].name);
+    try std.testing.expectEqualStrings("can0", reparsed.messages.items[0].bus);
+}
+
+test "selected-bus DBC export reports an unknown bus" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    try doc.buses.append(doc.allocator(), .{ .name = "can0" });
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.UnknownBus, writeForBusWithDiagnostics(std.testing.allocator, &doc, "can1", &diagnostics));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(diagnostic.Code.unknown_bus, diagnostics.items[0].code);
+}
+
+test "DBC export rejects punctuation in identifiers" {
+    var doc = model.Document.init(std.testing.allocator);
+    defer doc.deinit();
+    try doc.nodes.append(doc.allocator(), .{ .name = "ECU$1" });
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    try std.testing.expectError(error.UnsupportedConstruct, writeWithDiagnostics(std.testing.allocator, &doc, &diagnostics));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqualStrings("node name is not a valid DBC identifier", diagnostics.items[0].message);
+}
+
+test "DBC string attribute values escape and round-trip quotes and backslashes" {
+    const source =
+        \\BA_DEF_ "Text" STRING;
+        \\BA_ "Text" "quoted \"value\" and \\ path";
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    const expected = "quoted \"value\" and \\ path";
+    try std.testing.expectEqualStrings(expected, doc.attributes.items[0].value.string);
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BA_ \"Text\" \"quoted \\\"value\\\" and \\\\ path\";\n") != null);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings(expected, reparsed.attributes.items[0].value.string);
+}
+
 test "global comment imports and exports as the document description" {
     const source = "BO_ 1 M: 1 ECU\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\nCM_ \"ride60 CAN matrix\";\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
@@ -1559,8 +2310,8 @@ test "exponent notation numbers stay one token and round-trip" {
     try std.testing.expectEqualStrings("1.84467440737096E+019", reparsed.messages.items[0].signals.items[0].maximum.?);
 }
 
-test "multi-line comments stay one statement and are preserved verbatim" {
-    const source = "BO_ 1 M: 1 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nCM_ EV_ Env \"first line\r\nperiod: 100ms\";\r\nFOO_ after;\r\n";
+test "unmodeled multi-line comments stay one statement and are preserved verbatim" {
+    const source = "BO_ 1 M: 1 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nCM_ SGTYPE_ Env \"first line\r\nperiod: 100ms\";\r\nFOO_ after;\r\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
     defer diagnostics.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
@@ -1570,7 +2321,7 @@ test "multi-line comments stay one statement and are preserved verbatim" {
     defer doc.deinit();
     const statements = doc.dbc.?.object.get("opaque_statements").?.array;
     try std.testing.expectEqual(@as(usize, 2), statements.items.len);
-    try std.testing.expectEqualStrings("CM_ EV_ Env \"first line\r\nperiod: 100ms\";", statements.items[0].object.get("raw").?.string);
+    try std.testing.expectEqualStrings("CM_ SGTYPE_ Env \"first line\r\nperiod: 100ms\";", statements.items[0].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 3), statements.items[0].object.get("line").?.integer);
     try std.testing.expectEqualStrings("FOO_ after;", statements.items[1].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 5), statements.items[1].object.get("line").?.integer);
@@ -1621,6 +2372,50 @@ test "Vector independent-signal pseudo-message is skipped with a warning" {
     try std.testing.expectEqual(diagnostic.Code.dbc_independent_signals_skipped, diagnostics.items[0].code);
 }
 
+test "typed attributes preserve scope-like strings and reject mismatched scopes" {
+    const source =
+        \\BA_DEF_ "Label" STRING;
+        \\BA_ "Label" "BO_";
+    ;
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    var doc = try parse(std.testing.allocator, source, &diagnostics);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("BO_", doc.attributes.items[0].value.string);
+
+    const output = try write(std.testing.allocator, &doc);
+    defer std.testing.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "BA_ \"Label\" \"BO_\";\n") != null);
+    var reparsed = try parse(std.testing.allocator, output, &diagnostics);
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("BO_", reparsed.attributes.items[0].value.string);
+
+    const mismatch =
+        \\BU_: ECU
+        \\BO_ 1 M: 1 ECU
+        \\BA_DEF_ BU_ "Role" STRING;
+        \\BA_ "Role" BO_ 1 "controller";
+    ;
+    diagnostics.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, mismatch, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 4), diagnostics.items[0].source.dbc.line);
+}
+
+test "environment variable records reject malformed declarations and unknown targets" {
+    const cases = [_][]const u8{
+        "EV_ Ambient: 0 [0|255] \"degC\" 0 1 0 ;\n",
+        "EV_ Payload: 3 [0|0] \"\" 0 2 0 ECU;\nENVVAR_DATA_ Missing : 16;\n",
+        "CM_ EV_ Missing \"comment\";\n",
+    };
+    var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    for (cases, 0..) |source, index| {
+        diagnostics.clearRetainingCapacity();
+        try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
+        try std.testing.expectEqual(@as(u32, if (index == 1) 2 else 1), diagnostics.items[0].source.dbc.line);
+    }
+}
+
 test "VFrameFormat imports and exports CAN FD frames with CRLF lines" {
     const source = "VERSION \"1\"\r\nNS_ :\r\nBS_:\r\nBU_: ECU\r\nBO_ 291 Engine: 8 ECU\r\n SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU\r\nBA_DEF_ BO_ \"VFrameFormat\" ENUM \"StandardCAN\",\"ExtendedCAN\",\"StandardCAN_FD\",\"ExtendedCAN_FD\";\r\nBA_ \"VFrameFormat\" BO_ 291 2;\r\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
@@ -1640,7 +2435,7 @@ test "VFrameFormat imports and exports CAN FD frames with CRLF lines" {
 }
 
 test "unimplemented DBC statements are rejected with source locations" {
-    const source = "BO_ 1 M: 1 ECU\nCM_ EV_ Env \"comment\";\n";
+    const source = "BO_ 1 M: 1 ECU\nCM_ SGTYPE_ Env \"comment\";\n";
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
     defer diagnostics.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidDbc, parse(std.testing.allocator, source, &diagnostics));
@@ -1653,7 +2448,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
         \\VERSION "1"
         \\BO_ 1 M: 1 ECU
         \\ SG_ Value : 0|8@1+ (1,0) [0|255] "" ECU
-        \\CM_ EV_ Env "comment";
+        \\CM_ SGTYPE_ Env "comment";
         \\FOO_ arbitrary;
     ;
     var diagnostics: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
@@ -1663,7 +2458,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
 
     const statements = doc.dbc.?.object.get("opaque_statements").?.array;
     try std.testing.expectEqual(@as(usize, 2), statements.items.len);
-    try std.testing.expectEqualStrings("CM_ EV_ Env \"comment\";", statements.items[0].object.get("raw").?.string);
+    try std.testing.expectEqualStrings("CM_ SGTYPE_ Env \"comment\";", statements.items[0].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 4), statements.items[0].object.get("line").?.integer);
     try std.testing.expectEqualStrings("FOO_ arbitrary;", statements.items[1].object.get("raw").?.string);
     try std.testing.expectEqual(@as(i64, 5), statements.items[1].object.get("line").?.integer);
@@ -1676,7 +2471,7 @@ test "unsupported DBC statements can be preserved and exported on request" {
 
     const output = try write(std.testing.allocator, &json_doc);
     defer std.testing.allocator.free(output);
-    try std.testing.expect(std.mem.endsWith(u8, output, "CM_ EV_ Env \"comment\";\nFOO_ arbitrary;\n"));
+    try std.testing.expect(std.mem.endsWith(u8, output, "CM_ SGTYPE_ Env \"comment\";\nFOO_ arbitrary;\n"));
 
     var reparsed = try parseWithOptions(std.testing.allocator, output, &diagnostics, .{ .preserve_unsupported_statements = true });
     defer reparsed.deinit();
